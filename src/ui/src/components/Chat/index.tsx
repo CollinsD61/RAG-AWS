@@ -1,0 +1,367 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import {
+  ContentLayout,
+  Header,
+  SpaceBetween,
+  Container,
+  Box,
+  CopyToClipboard,
+  ExpandableSection,
+  Tabs,
+  Textarea,
+  Button,
+  FormField,
+  Alert,
+  Spinner,
+} from '@cloudscape-design/components';
+import { generateClient } from 'aws-amplify/api';
+import { getConfiguration } from '../../graphql/queries/getConfiguration';
+import { updateConfiguration } from '../../graphql/mutations/updateConfiguration';
+import { ApiDocs } from '../common/ApiDocs';
+import type { GqlResponse } from '../../types/graphql';
+
+const graphqlEndpoint = import.meta.env.VITE_GRAPHQL_URL || '';
+
+// Chat API examples
+const chatGraphql = `query QueryKnowledgeBase($query: String!, $conversationId: String) {
+  queryKnowledgeBase(query: $query, conversationId: $conversationId) {
+    answer
+    conversationId
+    sources { documentId, filename, snippet, score }
+    filterApplied
+  }
+}`;
+
+const chatJsExample = `const res = await fetch(ENDPOINT, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
+  body: JSON.stringify({
+    query: QUERY_KB,
+    variables: {
+      query: 'What is the return policy?',
+      conversationId: 'user-123-session'  // Optional: for multi-turn context
+    }
+  })
+});
+const { answer, sources } = (await res.json()).data.queryKnowledgeBase;`;
+
+const chatCurlExample = `curl -X POST 'ENDPOINT' \\
+  -H 'Content-Type: application/json' \\
+  -H 'x-api-key: API_KEY' \\
+  -d '{
+    "query": "query { queryKnowledgeBase(query: \\"What is the return policy?\\") { answer, sources { snippet } } }"
+  }'`;
+
+
+interface ConfigData {
+  Default: string;
+  Custom: string;
+}
+
+const DEFAULT_SYSTEM_PROMPT = 'You are a helpful assistant that answers questions based on information from a knowledge base. Always base your answers on the provided knowledge base information. If the provided information doesn\'t contain the answer, clearly state that and provide what relevant information you can. Be concise but thorough.';
+
+export function Chat() {
+  const [cdnUrl, setCdnUrl] = useState<string | null>(null);
+  const [requireAuth, setRequireAuth] = useState(false);
+  const [activeTab, setActiveTab] = useState('basic');
+  const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
+  const [originalPrompt, setOriginalPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'success' | 'error' | null>(null);
+  const [scriptLoaded, setScriptLoaded] = useState(false);
+  const [scriptError, setScriptError] = useState<string | null>(null);
+  const [configLoaded, setConfigLoaded] = useState(false);
+  const scriptLoadedRef = useRef(false);
+  const client = useMemo(() => generateClient(), []);
+
+  // Load configuration
+  useEffect(() => {
+    async function loadConfig() {
+      try {
+        const response = await client.graphql({ query: getConfiguration }) as GqlResponse;
+        const config = response.data?.getConfiguration as ConfigData | undefined;
+        const parsedDefault = JSON.parse(config?.Default || '{}');
+        const parsedCustom = JSON.parse(config?.Custom || '{}');
+        const merged = { ...parsedDefault, ...parsedCustom };
+        setCdnUrl(merged.chat_cdn_url || null);
+        setRequireAuth(merged.chat_require_auth || false);
+        const prompt = merged.chat_system_prompt || DEFAULT_SYSTEM_PROMPT;
+        setSystemPrompt(prompt);
+        setOriginalPrompt(prompt);
+        setConfigLoaded(true);
+      } catch (err) {
+        setConfigLoaded(true); // Still mark loaded so we don't spin forever
+      }
+    }
+    loadConfig();
+  }, [client]);
+
+  // Load ragstack-chat web component script
+  useEffect(() => {
+    if (!cdnUrl || scriptLoadedRef.current) return;
+
+    // Check if script already exists
+    const existingScript = document.querySelector(`script[src="${cdnUrl}"]`);
+    if (existingScript) {
+      setScriptLoaded(true);
+      scriptLoadedRef.current = true;
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = cdnUrl;
+    script.async = true;
+    script.onload = () => {
+      setScriptLoaded(true);
+      scriptLoadedRef.current = true;
+    };
+    script.onerror = () => {
+      setScriptError('Failed to load chat component');
+    };
+    document.head.appendChild(script);
+
+    return () => {
+      // Don't remove script on unmount - it may be used elsewhere
+    };
+  }, [cdnUrl]);
+
+  const handleSavePrompt = async () => {
+    setIsSaving(true);
+    setSaveStatus(null);
+    try {
+      await client.graphql({
+        query: updateConfiguration,
+        variables: { customConfig: JSON.stringify({ chat_system_prompt: systemPrompt }) }
+      });
+      setOriginalPrompt(systemPrompt);
+      setSaveStatus('success');
+      setTimeout(() => setSaveStatus(null), 3000);
+    } catch (err) {
+      setSaveStatus('error');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const hasPromptChanged = systemPrompt !== originalPrompt;
+
+  const cdnPlaceholder = cdnUrl || 'https://your-cdn-url/ragstack-chat.js';
+
+  const basicEmbed = `<script src="${cdnPlaceholder}"></script>
+<ragstack-chat conversation-id="my-site"></ragstack-chat>`;
+
+  const authEmbed = `<script src="${cdnPlaceholder}"></script>
+<ragstack-chat
+  conversation-id="my-site"
+  user-id="USER_ID"
+  user-token="COGNITO_JWT_TOKEN"
+></ragstack-chat>
+
+<script>
+// Get token from your auth provider (Cognito, Auth0, etc.)
+async function initChat() {
+  const token = await getAuthToken(); // Your auth logic
+  const userId = getCurrentUserId();  // Your user ID
+
+  const chat = document.querySelector('ragstack-chat');
+  chat.setAttribute('user-token', token);
+  chat.setAttribute('user-id', userId);
+}
+initChat();
+</script>`;
+
+  return (
+    <ContentLayout
+      header={
+        <Header
+          variant="h1"
+          description="Ask questions about your documents using natural language"
+        >
+          Knowledge Base Chat
+        </Header>
+      }
+    >
+      <SpaceBetween size="l">
+        {/* Ragstack Chat Web Component */}
+        <Container>
+          {scriptError && (
+            <Alert type="error">{scriptError}</Alert>
+          )}
+          {!configLoaded && (
+            <Box textAlign="center" padding="l">
+              <Spinner /> Loading configuration...
+            </Box>
+          )}
+          {configLoaded && !cdnUrl && !scriptError && (
+            <Alert type="warning">
+              Chat widget CDN URL not configured. Deploy with <code>--skip-ui</code> instead of <code>--skip-ui-all</code> to enable the chat widget.
+            </Alert>
+          )}
+          {cdnUrl && !scriptLoaded && !scriptError && (
+            <Box textAlign="center" padding="l">
+              <Spinner /> Loading chat component...
+            </Box>
+          )}
+          {scriptLoaded && (
+            <div
+              style={{ minHeight: '500px' }}
+              ref={(el) => {
+                if (el && !el.querySelector('ragstack-chat')) {
+                  // No conversation-id set - component auto-generates unique UUID per browser
+                  const chat = document.createElement('ragstack-chat');
+                  el.appendChild(chat);
+                }
+              }}
+            />
+          )}
+        </Container>
+
+        <Container>
+          <ExpandableSection headerText="System Prompt" variant="footer">
+            <SpaceBetween size="m">
+              <FormField
+                label="Chat System Prompt"
+                description="This prompt defines how the AI assistant responds to questions. Changes take effect immediately for new conversations."
+              >
+                <Textarea
+                  value={systemPrompt}
+                  onChange={({ detail }) => setSystemPrompt(detail.value)}
+                  rows={5}
+                  placeholder="Enter the system prompt for the chat assistant..."
+                />
+              </FormField>
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button
+                  variant="primary"
+                  onClick={handleSavePrompt}
+                  loading={isSaving}
+                  disabled={!hasPromptChanged}
+                >
+                  Save
+                </Button>
+                <Button
+                  variant="link"
+                  onClick={() => setSystemPrompt(originalPrompt)}
+                  disabled={!hasPromptChanged || isSaving}
+                >
+                  Cancel
+                </Button>
+              </SpaceBetween>
+              {saveStatus === 'success' && (
+                <Alert type="success" dismissible onDismiss={() => setSaveStatus(null)}>
+                  System prompt saved successfully.
+                </Alert>
+              )}
+              {saveStatus === 'error' && (
+                <Alert type="error" dismissible onDismiss={() => setSaveStatus(null)}>
+                  Failed to save system prompt. Please try again.
+                </Alert>
+              )}
+            </SpaceBetween>
+          </ExpandableSection>
+        </Container>
+
+        <Container>
+          <ExpandableSection headerText="Embed Chat Widget" variant="footer">
+              <SpaceBetween size="m">
+                <Box variant="small" color="text-body-secondary">
+                  Add to any HTML page. Works with React, Vue, Angular, Svelte, or plain HTML.
+                  {requireAuth && (
+                    <Box color="text-status-warning" padding={{ top: 'xs' }}>
+                      <strong>Authentication required:</strong> Your current settings require user authentication.
+                    </Box>
+                  )}
+                </Box>
+
+                <Tabs
+                  activeTabId={activeTab}
+                  onChange={({ detail }) => setActiveTab(detail.activeTabId)}
+                  tabs={[
+                    {
+                      id: 'basic',
+                      label: 'Basic (Public)',
+                      content: (
+                        <SpaceBetween size="s">
+                          <Box variant="small" color="text-body-secondary">
+                            For public access when authentication is disabled.
+                          </Box>
+                          <code
+                            style={{
+                              display: 'block',
+                              whiteSpace: 'pre-wrap',
+                              padding: '12px',
+                              background: '#1a1a2e',
+                              color: '#e6e6e6',
+                              borderRadius: '6px',
+                              fontFamily: "'Fira Code', monospace",
+                              fontSize: '12px',
+                            }}
+                          >
+                            {basicEmbed}
+                          </code>
+                          <CopyToClipboard
+                            textToCopy={basicEmbed}
+                            copyButtonText="Copy"
+                            copySuccessText="Copied!"
+                            copyErrorText="Failed to copy"
+                            variant="icon"
+                          />
+                        </SpaceBetween>
+                      ),
+                    },
+                    {
+                      id: 'auth',
+                      label: 'Authenticated',
+                      content: (
+                        <SpaceBetween size="s">
+                          <Box variant="small" color="text-body-secondary">
+                            Pass user credentials from your auth provider (Cognito, Auth0, etc.)
+                          </Box>
+                          <code
+                            style={{
+                              display: 'block',
+                              whiteSpace: 'pre-wrap',
+                              padding: '12px',
+                              background: '#1a1a2e',
+                              color: '#e6e6e6',
+                              borderRadius: '6px',
+                              fontFamily: "'Fira Code', monospace",
+                              fontSize: '12px',
+                              maxHeight: '300px',
+                              overflow: 'auto',
+                            }}
+                          >
+                            {authEmbed}
+                          </code>
+                          <CopyToClipboard
+                            textToCopy={authEmbed}
+                            copyButtonText="Copy"
+                            copySuccessText="Copied!"
+                            copyErrorText="Failed to copy"
+                            variant="icon"
+                          />
+                        </SpaceBetween>
+                      ),
+                    },
+                  ]}
+                />
+              </SpaceBetween>
+          </ExpandableSection>
+        </Container>
+
+        {graphqlEndpoint && (
+          <ApiDocs
+            title="Chat API"
+            description="For backend integrations, MCP servers, and scripts. Supports multi-turn conversations via conversationId."
+            endpoint={graphqlEndpoint}
+            examples={[
+              { id: 'graphql', label: 'GraphQL', code: chatGraphql },
+              { id: 'js', label: 'JavaScript', code: chatJsExample },
+              { id: 'curl', label: 'cURL', code: chatCurlExample },
+            ]}
+          />
+        )}
+      </SpaceBetween>
+    </ContentLayout>
+  );
+}

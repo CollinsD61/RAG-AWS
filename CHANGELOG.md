@@ -1,0 +1,450 @@
+# Changelog
+
+## [ragstack-mcp 0.1.8] - 2026-04-27
+
+### Fixed
+
+- **`get_key_library` crashed with `'NoneType' object has no attribute 'get'` when invoked with API-key auth.** AppSync nullifies inner fields of objects whose return-type lacks the caller's auth directive — `getKeyLibrary` is `@aws_api_key @aws_cognito_user_pools` but its return type `MetadataKey` was only `@aws_cognito_user_pools`, so each list element came back as `null`. MCP now filters out None elements and reports the entries-hidden count instead of crashing.
+
+### Changed (backend)
+
+- **AppSync schema**: added `@aws_api_key` to `MetadataKey`, `KeySimilarityResult`, and `SimilarKey` so API-key clients can read inner fields. Requires a stack redeploy to take effect; until then the MCP defensive filter prevents the crash but the data won't be visible to API-key callers.
+
+## [ragstack-mcp 0.1.7] - 2026-04-27
+
+### Fixed
+
+- **`get_key_library` (and 14 other tools) crashed with `'NoneType' object has no attribute 'get'`**: Every tool used `result.get("data", {}).get("fieldName")` to extract its GraphQL payload, but the dict-`get` default only fires when the key is missing — when GraphQL sets `data` itself to null (which it does on errors or absent fields), the inner `.get` runs on `None`. Switched all 15 call sites to `(result.get("data") or {}).get(...)`.
+- **Same defaults bug in `data.get("fields"/"filter", "{}")`** (3 places, used by `upload_document_url`, `upload_image_url`, `get_filter_examples`): would store `None` and crash on the subsequent `json.loads`. Fixed with `or "{}"` fallback.
+
+## [ragstack-mcp 0.1.6] - 2026-04-27
+
+### Fixed
+
+- **`get_configuration` tool errored with `the JSON object must be str, bytes or bytearray, not NoneType`**: GraphQL returns `Schema/Default/Custom` as JSON null when absent; `data.get(k, "{}")` only falls back when the key is missing, not when the value is `None`. Switched to `data.get(k) or "{}"`.
+
+## [ragstack-mcp 0.1.5] - 2026-04-27
+
+### Changed
+
+- **No functional change.** Pure `ruff format` cleanup in `server.py` (import ordering, quote-style consistency, multi-line list literals). Republished so the publish workflow advances past the `0.1.4` already-on-PyPI 400.
+
+## [2.5.1] - 2026-03-28
+
+### Fixed
+
+- **KB retrieval failures silently swallowed**: `except Exception: pass` around Bedrock KB retrieval in `query_kb/handler.py` hid all errors. Now surfaces `ClientError` with specific handling for `ThrottlingException` (user-friendly retry message) vs other errors.
+- **Unsafe `os.environ[]` access across Lambdas**: Replaced all bracket-style env var access with `os.environ.get()` plus explicit `ValueError` for required vars in `appsync_resolvers`, `queue_processor`, and `dlq_replay`.
+- **Unbounded S3 reads risk OOM**: `read_s3_text()` and `read_s3_binary()` now check `ContentLength` before reading, with a configurable `max_size_bytes` (default 50MB).
+- **DynamoDB partition key wrong in troubleshooting docs**: Query example used `"PK"` instead of `"Configuration"`.
+- **`--project-name` flag references across docs**: All documentation now uses `--stack-name` (the actual CLI flag).
+- **Caching documentation contradictions**: Three docs claimed "no caching" while `ConfigurationManager` uses request-scoped caching. All now consistent.
+- **12 drift findings in DEVELOPMENT.md**: Corrected nonexistent scripts, wrong filenames, stale descriptions, and missing Lambda functions.
+
+### Changed
+
+- **AppSync resolvers split into domain modules**: `appsync_resolvers/index.py` reduced from 1,400+ lines to 179-line dispatcher. Business logic extracted into `resolvers/shared.py`, `documents.py`, `images.py`, `scrape.py`, `metadata.py`, `chat.py`.
+- **`query_kb` dual-import pattern consolidated**: `_compat.py` now centralizes all cross-module imports. Consumer modules use a single `try/except ImportError` block each (was 5-6 per file). `type: ignore` comments reduced from ~25 to ~16.
+- **`extract_kb_scalar` deduplicated**: Moved from inline implementations in both `search_kb` and `query_kb` to shared `ragstack_common.kb_filters` module with unit tests.
+- **S3 URI parsing consolidated**: 16 inline `replace("s3://", "").split(...)` patterns replaced with `parse_s3_uri()` from `ragstack_common.storage`.
+- **Exception handling narrowed**: Bare `except Exception` blocks replaced with specific types (`ClientError`, `ValueError`, `KeyError`, `TypeError`) across `query_kb` and `appsync_resolvers`. One documented safety-net catch-all retained per Lambda.
+- **`combine_pages` boto3 clients moved to module level**: Lazy-init singletons for connection reuse across warm Lambda invocations.
+
+### Added
+
+- **Request-scoped config caching**: `ConfigurationManager.get_effective_config()` caches results within a single Lambda invocation. `clear_cache()` called at handler entry points.
+- **Frontend type safety wrappers**: `graphql.ts` with `gqlQuery()` and `gqlSubscribe()` replaces all `as unknown as string` and `as any` casts in UI hooks.
+- **`no-console` ESLint rule**: 66 `console.log/error/warn` calls removed from frontend source. Rule enforced for all `.ts/.tsx` files.
+- **Coverage enforcement**: `--cov-fail-under=60` in CI pytest (current coverage: 65%).
+- **Pre-commit hooks**: `.pre-commit-config.yaml` with ruff check and format hooks.
+- **Missing doc links**: IMAGE_UPLOAD.md, API_REFERENCE.md, and MIGRATION.md added to README documentation index.
+- **Repository structure updated**: CLAUDE.md and DEVELOPMENT.md reflect resolver split, 32 Lambda functions, and current architecture.
+
+### Removed
+
+- **Unused `min_per_slice` parameter**: Removed from `merge_slices_with_guaranteed_minimum()` along with vulture whitelist entry.
+
+### Security
+
+- **npm audit vulnerabilities resolved**: Zero vulnerabilities across root, `src/ui`, and `src/ragstack-chat`.
+- **pygments CVE-2026-4539**: No fix version available (transitive dep from pytest). Documented as known exception.
+
+## [2.5.0] - 2026-03-20
+
+### Breaking Changes
+
+- **Chat API is now async (mutation + polling)**: `queryKnowledgeBase` moved from `Query` to `Mutation`. Returns immediately with `PENDING` status. Clients must poll `getConversation` for results. The old synchronous query no longer exists. All consumers must redeploy their backend stack.
+- **conversationId and requestId must be UUID v4**: The backend validates both IDs. Non-UUID conversation IDs stored in localStorage from previous versions are automatically regenerated by the web component. Custom `conversationId` props that aren't valid UUIDs are silently replaced (with a console warning).
+- **ChatResponse type removed from schema**: Replaced by `ChatRequest` (mutation response) and `ConversationTurn` (within `Conversation` type).
+
+### Added
+
+- **Async chat pattern**: `queryKnowledgeBase` mutation writes a PENDING record to DynamoDB, async-invokes `QueryKBFunction`, and returns immediately. Bypasses AppSync's 30-second resolver timeout for Bedrock Converse API calls that take 30-50s.
+- **`getConversation` query**: Returns all turns for a conversation from DynamoDB. Used by the client for polling and will support future conversation listing/search.
+- **New schema types**: `ChatRequest`, `ChatStatus`, `ConversationTurn`, `Conversation`.
+- **Polling with step backoff**: Client polls at 1s initial interval, 1.5x growth, 5s cap. Progressive timeout UX: 30s "taking longer than usual" indicator, 90s hard timeout.
+- **AbortController support**: Polling cancels on component unmount or new message send. In-flight fetch requests are aborted via `AbortSignal`.
+- **User-scoped conversations**: `userId` persisted on conversation turns. `getConversation` denies access when the turn's `userId` doesn't match the requester (or requester is unauthenticated).
+- **Conversation ID validation**: Web component validates localStorage and prop values, auto-regenerates invalid (non-UUID) IDs with console warning.
+
+### Fixed
+
+- **Race condition in turn number assignment**: Concurrent requests could assign the same `turnNumber`. Now uses conditional `put_item` with `attribute_not_exists(turnNumber)` and retry on conflict.
+- **PENDING turns contaminate LLM context**: `get_conversation_history` now filters out PENDING turns so in-progress requests don't inject empty assistant responses into the Bedrock Converse context.
+- **Orphaned PENDING records**: If async Lambda invoke fails after writing the PENDING record, the record is cleaned up via `delete_item`.
+- **Polling swallowed HTTP errors**: Non-OK poll responses now track consecutive failures; 4xx errors surface immediately; 5 consecutive failures trigger an error.
+- **CONVERSATION_TABLE_NAME not guarded**: Both resolvers now raise a clear error if the env var is missing.
+- **DynamoDB type safety**: `turnNumber`, `status`, `sources` values normalized from DynamoDB attribute unions to concrete Python types. Passes mypy strict mode.
+- **Chat prompts logged to CloudWatch**: `queryKnowledgeBase` arguments now redact the `query` field in resolver logs.
+- **Stale callback refs**: `onSendMessage` and `onResponseReceived` callbacks use `useRef` pattern to avoid stale closures.
+- **`except (ClientError, Exception)` simplified**: Redundant catch clause replaced with `except ClientError`.
+
+### Changed
+
+- **`getConversation` added to access_requirements**: Public access gate now enforced before reading conversations.
+- **`store_conversation_turn` includes status and userId**: Sync code path now writes `status: "COMPLETED"` and `userId` for consistency with async path.
+- **`getConversation` paginates DynamoDB results**: Iterates `LastEvaluatedKey` to handle conversations exceeding the 1 MB page limit.
+- **CSS design token**: Slow response indicator uses `var(--chat-spacing-xs)` instead of hardcoded `4px`.
+- **Removed unused `isSlowResponse` from `ChatMessage` type**: Only used as component state and `MessageListProps` prop.
+
+### Docs
+
+- **API reference updated**: Documents async mutation + polling pattern with GraphQL and curl examples.
+- **ragstack-chat docs updated**: `conversationId` prop documented as UUID (auto-generated if omitted or invalid). Non-UUID examples removed.
+
+## [2.4.0] - 2026-03-20
+
+### Added
+
+- **DLQ replay Lambda**: New `dlq_replay` Lambda replays messages from any of the 5 DLQ/source-queue pairs (processing, batch, scrape-discovery, scrape-processing, sync). Manually triggered. FIFO queues use fresh dedup IDs to avoid SQS deduplication. `ReservedConcurrentExecutions: 1` prevents concurrent replay races. CloudWatch alarms added for all 5 DLQs.
+- **S3 size guard**: `read_s3_binary` accepts `max_size_bytes` — performs a HEAD check before GET and fails closed (raises `ClientError` on HEAD failure instead of falling through to download). Used by OCR to prevent OOM on oversized documents.
+- **UI error boundaries**: `ErrorBoundary` component wraps each route and the `DocumentTable`. Supports both static `ReactNode` fallback and render-prop `(reset) => ReactNode` for custom recovery UI. Raw error messages gated behind `import.meta.env.DEV`.
+- **UI notification system**: `NotificationProvider` with Cloudscape Flashbar replaces `window.alert`. Auto-dismiss timers with cleanup on unmount, notification cap at 10, Cloudscape `Button` for actions. Delete failures now surface to users (previously console-only).
+- **mypy strict mode**: Added to CI pipeline. Type annotations across all 18+ Lambda handlers and `ragstack_common`. `TypedDict` contracts for `SourceInfo`, `ChatResponse`, `ConversationTurn`. `boto3-stubs` with textract extra for typed Textract client.
+- **Dependabot**: Automated dependency updates for npm (root, src/ui, src/ragstack-chat), pip, and GitHub Actions.
+- **12 new test files**: Unit tests for admin_user_provisioner, api_key_resolver, batch_processor, budget_sync, combine_pages, configuration_resolver, dlq_replay, enqueue_batches, initial_sync, kb_custom_resource, queue_processor, start_codebuild. Full suite: 1071 tests.
+- **Claude Forge skills**: Pipeline skills for repo-eval, repo-health, doc-health, brainstorm, and audit workflows.
+
+### Fixed
+
+- **Queue processor reindex lock broken** (critical): `get_item` used `{"config_key": REINDEX_LOCK_KEY}` but ConfigurationTable partition key is `Configuration`. Lock was completely non-functional — uploads were never blocked during reindex.
+- **Enqueue batches: SQS partial failures ignored** (critical): `send_message_batch` response `Failed` array was not checked. If individual entries failed, DynamoDB batch counters were already written, permanently stalling the document. Now raises `RuntimeError` on any failure. DynamoDB write moved after SQS send verification.
+- **Reindex sync: exception promotes unverified KB** (critical): `handle_check_sync_status` returned `action: "finalize"` on Bedrock exceptions and FAILED/STOPPED status, causing `handle_finalize` to promote the new KB and delete the old one without verifying sync completed. Now returns `action: "abort"` which routes to `PrepareCleanup` via new state machine choice.
+- **kb_migrator: wrong field name for S3 Vectors index**: `delete_knowledge_base` read `vectorIndexArn` but Bedrock API returns `indexArn` in `s3VectorsConfiguration`. S3 Vectors index cleanup silently skipped on every delete. Added `S3_VECTORS` storage type handling alongside legacy `S3`.
+- **str(None) → "None" across multiple handlers**: `str(item.get("field", default))` produces `"None"` when DynamoDB stores explicit null. Fixed in `reindex_kb` (documents, scraped items, media, images), `move_video`, and `enqueue_batches` using `item.get("field") or default` pattern.
+- **ConversationTurn TypedDict mismatch**: Fields were `query`/`answer` but `conversation.py` stores `userMessage`/`assistantResponse`/`turnNumber`/`createdAt`. Updated to match actual DynamoDB schema.
+- **scrape_status limit parameter injection**: Raw `int()` conversion on user-supplied `limit` query param raised unhandled `ValueError` as 500. Now validates with try/except, clamps to 1-100, returns 400 on bad input.
+- **reindex_kb prerequisite validation**: `update_config_kb_ids` was called before checking `STACK_NAME` and `new_data_source_id`, risking partial config table mutation. Validation now runs first.
+- **Verbose per-result logging**: 14 `[SOURCE]` and 3 `[RETRIEVE]`/`[RESULT]` info-level logs per query downgraded to debug. Reduces CloudWatch costs at scale.
+
+### Changed
+
+- **query_kb refactored**: Split 1,824-line `index.py` into `handler.py`, `conversation.py`, `filters.py`, `media.py`, `retrieval.py`, `sources.py`, `_clients.py`. Lambda handler path unchanged.
+- **Query rewrite model configurable**: Hardcoded `us.amazon.nova-lite-v1:0` now reads `chat_query_rewrite_model` from DynamoDB config.
+- **DynamoDB scan capped**: ID-pattern fallback scan in `retrieval.py` limited to 10 pages max to prevent expensive full-table scans.
+- **Quota applied to all callers**: Per-caller quota check now runs for anonymous users (via `anon:{conversationId}` tracking ID), not just authenticated users.
+- **Quota after validation**: `atomic_quota_check_and_increment` moved after query validation to avoid wasting quota on empty/invalid/oversized queries.
+- **QueryKB Lambda timeout**: Increased from 60s to 90s for long LLM responses.
+- **storage.py fail-closed**: HEAD failure with `max_size_bytes` set now raises `ClientError` instead of silently falling through to GET.
+
+### Docs
+
+- **doc-auditor skill**: Phase 3 explicitly static-only (no code execution). Sentence variety improved.
+- **final_reviewer skill**: Fixed `pipeline.md` → `pipeline-protocol.md` references.
+- **repo-health skill**: `$ARGUMENTS` forwarded to auditor spawn.
+
+## [2.3.8] - 2026-03-12
+
+### Fixed
+
+- **Batch processor writes to wrong S3 path**: EventBridge produces `output_s3_prefix` as `s3://bucket/content/input/{doc_id}/{filename}/` but the correct path is `s3://bucket/content/{doc_id}/`. `process_document` already fixed this for small docs (≤10 pages), but `batch_processor` (large docs >10 pages) passed it through raw. This caused batched documents to write extracted text under `content/input/`, breaking source link resolution in chat.
+- **Reprocess fails instantly on Step Functions**: `_reprocess_as_document` and `_reprocess_media` passed a bare UUID as `document_id`, but the `ExtractDocumentId` state expects an S3 key format (`input/{doc_id}/{filename}`). Now derives the S3 key from `input_s3_uri`.
+- **Dashboard metadata doesn't match KB filters**: `extracted_metadata` in DynamoDB stored raw LLM output (full names like "dwight sheldon tillotson") while the KB received the normalized, tokenized version. Dashboard now stores the same normalized metadata that the KB uses for filtering.
+- **Metadata extraction misses obvious fields on form-heavy documents**: The LLM received only raw extracted text with no filename context, causing it to fixate on form boilerplate and miss people, dates, and locations clearly present in the document. Now prepends the original filename to the extraction input, giving the LLM a strong signal for what to extract.
+- **Metadata tokenizer chokes on semicolons, pipes, slashes, and punctuation**: `expand_to_searchable_array` only split on commas, so LLM values like `"kent, ohio; hudson, ohio"` produced garbage tokens like `"ohio; hudson"`. Now normalizes semicolons, pipes, and slashes as delimiters and strips leading/trailing punctuation from word tokens.
+- **Adaptive boost margin too aggressive**: 10% margin and 5% floor caused filtered results to dominate over semantically better unfiltered results, especially when metadata filters matched incomplete token sets. Reduced to 5% margin and 2% floor.
+
+## [2.3.7] - 2026-03-11
+
+### Added
+
+- **Bedrock Marketplace permissions**: Processing/admin Lambda roles include `aws-marketplace:Subscribe` and `ViewSubscriptions` via `BedrockMarketplaceAdminPolicy`. Runtime request-path roles (QueryKB, SearchKB, AppSyncResolver) receive only `ViewSubscriptions` via `BedrockMarketplacePolicy`. Third-party model agreements (Anthropic Claude, etc.) must be accepted by an admin or during the document processing pipeline — public-facing endpoints do not have Subscribe permissions.
+- **Expanded model options**: Added Nova 2 Lite and Nova Pro as options for OCR, chat primary, metadata extraction, and filter generation. Nova 2 Lite offers a cost-effective multimodal alternative with better reasoning than Nova Lite.
+
+### Fixed
+
+- **Metadata word tokens lost on name-heavy documents**: When a list metadata field (e.g., `people_mentioned`) had many multi-word entries, the original full phrases consumed the entire 10-item AWS STRING_LIST budget, silently dropping all word-level tokens. For example, a document with 10 people stored `["dwight sheldon tillotson", "charles m. tillotson", ...]` but never `"dwight"` or `"tillotson"`, making `$eq` filters on individual names fail. Now prioritizes single-word tokens over multi-word phrases, preserving insertion order from the source list so tokens from earlier (more important) names take priority.
+- **Remove unnecessary `AWS::S3::Bucket` VectorBucket resource**: The template created a regular S3 bucket for vector storage, but actual vectors are stored in an S3 Vectors bucket (different AWS service) created by the KnowledgeBase custom resource. The regular bucket was always empty and unused. When manually deleted, it caused CloudFormation update failures (S3Control 404 on every subsequent stack update). Replaced `!Ref VectorBucket` with a constructed name string, removed unused regular S3 IAM permissions (`s3:ListBucket`, `s3:GetObject`, `s3:PutObject`) from KnowledgeBaseRole and `S3CrudPolicy` from three Lambda functions. Bedrock KB with S3 Vectors only requires `s3vectors:` permissions per AWS documentation.
+
+### Docs
+
+- **Bedrock model access troubleshooting**: New section explaining Marketplace agreement requirements for third-party models, with diagnostic commands and resolution steps.
+- **Updated model selection guide**: Expanded recommendations table with Nova 2 Lite placement across all use cases.
+
+### Migration Note
+
+- Existing deployments update cleanly — CloudFormation deregisters the regular S3 bucket (`DeletionPolicy: Retain`) without deleting it. The only incompatibility is if a user manually deleted the regular S3 vector bucket outside of CloudFormation; in that case, recreate the empty bucket before deploying this update.
+
+## [2.3.6] - 2026-03-10
+
+### Fixed
+
+- **Textract batch processing fails on scanned PDFs**: The Textract OCR path never set `pages_succeeded`/`pages_failed` (both defaulted to 0), ignored `page_start`/`page_end` page range filtering, and used wrong output filename in batch mode. All batches reported "0 succeeded, 0 failed" causing documents to fail the 95% threshold. The Bedrock and text-native PDF paths were unaffected.
+- **Missing Textract async API permissions on BatchProcessor**: IAM role only had sync actions (`DetectDocumentText`, `AnalyzeDocument`). Added `StartDocumentTextDetection` and `GetDocumentTextDetection` required for multi-page PDF OCR.
+- **Blank scanned pages omitted from Textract results**: Pages with no extractable text (e.g., photos) produced no LINE blocks and were missing from `document.pages`. Now backfills empty Page objects for all pages in the batch range.
+- **Base64 overhead in Bedrock image size limit**: `_render_page_to_image` checked raw bytes against 5MB but Bedrock receives base64-encoded images (~33% larger). Now uses 75% of the limit as the effective threshold.
+- **Config seeder overwrites admin-edited settings**: `put_item` on every stack update reset runtime settings changed via the Settings UI. Now merges defaults into existing config, only backfilling missing keys.
+- **Stale variable reference in text-native PDF log**: `total_pages` renamed to `page_count` but log line not updated, causing `NameError` at runtime.
+- **Unused `BEDROCK_OCR_MODEL` env var on ProcessDocument and BatchProcessor**: Both Lambdas read OCR model from DynamoDB, not env vars. Removed unused env var (kept on ConfigSeeder which actually uses it).
+- **packaged.yaml BedrockOcrModelId default mismatch**: Default was Maverick instead of Haiku, inconsistent with template.yaml.
+
+### Changed
+
+- **JPEG-first page rendering for Bedrock OCR**: Renders scanned pages as JPEG instead of PNG first (~1MB vs 4.7MB at 150 DPI for photo-heavy content). Most pages fit at highest DPI on first attempt.
+
+## [2.3.5] - 2026-03-10
+
+### Changed
+
+- **Updated Bedrock models to latest versions**: Replaced legacy model IDs across the stack
+  - Claude Sonnet 4 → Claude Sonnet 4.6 (`us.anthropic.claude-sonnet-4-6`)
+  - Claude 3.5 Haiku → Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`) with cross-region `us.` prefix
+  - Llama 3.2 (90b/11b) → Llama 4 Maverick/Scout (`us.meta.llama4-maverick-17b-instruct-v1:0`, `us.meta.llama4-scout-17b-instruct-v1:0`)
+- **Expanded model options for all configurable use cases**:
+  - Chat primary: Added Nova Premier, Llama 4 Maverick, Llama 4 Scout
+  - Chat fallback: Added Nova 2 Lite, Llama 4 Scout
+  - Metadata extraction: Added Llama 4 Scout, removed legacy Claude 3.5 Haiku
+  - Filter generation: Added Llama 4 Scout, removed legacy Claude 3.5 Haiku
+
+## [2.3.4] - 2026-02-20
+
+### Added
+
+- **Adaptive filtered score boost**: Replaced static 1.25x multiplier with a reactive boost computed from the actual score gap between filtered and unfiltered results. The boost ensures filtered results (user intent) rank above unfiltered results regardless of KB size. `multislice_filtered_boost` now serves as the max boost ceiling. Falls back to static max boost when either slice is empty.
+- **Structured retrieval logging**: Multi-slice merge now logs `fill_rate`, `score_ratio`, `adaptive_boost`, and `max_boost` at INFO level for empirical tuning via CloudWatch Logs Insights.
+- **Project cost tracking**: All SAM stack resources tagged with `Project=stack-name` for AWS cost allocation.
+- **GitHub release automation**: CI workflow creates GitHub releases from version tags.
+- **Claude Code GitHub Action**: `@claude` mention handler for PR and issue assistance.
+
+### Fixed
+
+- **AWS account ID removed from quicklaunch bucket name**: Bucket name no longer contains the account ID.
+
+### Removed
+
+- **Claude code review workflow**: Removed unused (previously disabled) auto-review workflow.
+
+## [2.3.3] - 2026-02-17
+
+### Fixed
+
+- **Square brackets stripped from filenames during upload**: `sanitize_filename()` in `createUploadUrl` used an overly aggressive allowlist that replaced `[`, `]`, and other valid characters with underscores, causing `inputS3Uri` in DynamoDB to not match the actual S3 object key. Presigned URL downloads then failed with `NoSuchKey`. Replaced allowlist sanitization with minimal control character stripping — path traversal is already handled separately.
+
+## [2.3.2] - 2026-02-06
+
+### Added
+
+- **MCP Registry submission**: Prepared ragstack-mcp for the official Model Context Protocol Registry
+  - Added `mcp-name` verification marker for PyPI package validation
+  - Created `server.json` with registry schema, environment variable definitions, and transport config
+  - Registry name: `ragstack`
+  - Bumped ragstack-mcp to v0.1.3
+
+## [2.3.1] - 2026-02-04
+
+### Added
+
+- **AdditionalCorsOrigins parameter**: Parent stacks can now pass additional CORS origins for S3 data bucket access
+  - Enables uploads from Amplify-hosted or other external frontends when RAGStack is deployed as nested stack
+  - Accepts comma-separated URLs (e.g., `https://main.d123.amplifyapp.com,https://example.com`)
+
+- **Custom Cognito email templates**: Admin invite and verification emails now include branding and dashboard URL
+  - Invite email includes stack name, dashboard URL, username, and temporary password
+  - Verification email includes stack name and verification code
+  - Email delayed until UI build completes (when BuildDashboard=true) so dashboard link works immediately
+
+### Changed
+
+- **`chat_allow_document_access` default**: Changed from `False` to `True` - document sources are now downloadable by default
+
+### Fixed
+
+- **ProcessMedia Lambda non-media file crash**: EventBridge S3 events for non-media files no longer crash with `KeyError: 'document_id'`
+  - Lambda now properly detects EventBridge events and returns early for non-media files
+  - Previously logged "Skipping non-media file" but continued execution and crashed
+
+- **Ingestion retry for "running" job errors**: Fixed retry logic to also catch "running ingestion job" errors
+  - Previously only retried on "ongoing" keyword, missing "There is at least one running ingestion job" errors
+  - Documents uploaded during active KB sync now properly retry instead of failing with `OCR_COMPLETE` status
+
+## [2.3.0] - 2026-02-04
+
+### Added
+
+- **Comprehensive nested stack support**: StackPrefix parameter now applies to **all** 127+ AWS resources for complete parent/child stack isolation
+  - Lambda functions, DynamoDB tables, Step Functions, log groups, SSM parameters, S3 Vectors index, and all other resources
+  - Enables deploying RAGStack as a nested CloudFormation stack without uppercase naming conflicts
+  - Fully backward compatible: empty StackPrefix uses stack name (existing deployments unaffected)
+
+### Fixed
+
+- **Hardcoded stack name references in IAM permissions**: All ARN references in IAM policies now use StackPrefix conditional pattern
+  - CodeBuild log group permissions
+  - Lambda ARN permissions for Knowledge Base updates
+  - Step Functions log groups and execution ARNs
+  - SSM parameter ARNs
+  - Budget name environment variables
+
+### Documentation
+
+- **Nested stack deployment guide**: Updated to reflect StackPrefix applies to all resources, not just S3 buckets
+  - Added resource naming examples for Lambda, DynamoDB, Step Functions, log groups
+  - Clarified StackPrefix requirements and warnings apply to all resources
+  - Enhanced troubleshooting section
+
+## [2.2.1] - 2026-01-29
+
+### Fixed
+
+- **Configuration seeder Decimal handling**: Convert float defaults to Decimal when seeding config (fixes deployment failure for `multislice_filtered_boost`)
+
+## [2.2.0] - 2026-01-29
+
+### Added
+
+- **Configurable filtered results boost**: New UI setting in Metadata Query section to adjust score multiplier for filtered results (1.0-2.0 range, default 1.25)
+- **Boosted scores in search results**: Frontend now displays boosted relevance scores, reflecting actual ranking
+
+### Fixed
+
+- **Filter generation for name queries**: Strengthened LLM prompt to always generate `people_mentioned` filters when names are mentioned (e.g., "Pictures of Judy" → `{"people_mentioned": {"$eq": "judy"}}`)
+- **Filter examples use only allowed keys**: Validation ensures generated examples don't use keys outside the allowlist; prompt explicitly lists allowed keys
+- **AppSync config write permission**: Changed from `DynamoDBReadPolicy` to `DynamoDBCrudPolicy` so UI can save filter key settings
+- **DynamoDB Decimal handling**: Convert `float` to `Decimal` when writing config, and `Decimal` to `float` when reading boost values
+
+### Changed
+
+- **SchemaVersion bumped to 6**: Existing stacks will re-run seeder on deploy to get new config defaults (`multislice_filtered_boost`, `metadata_filter_examples`, `metadata_filter_keys`)
+- **Reindex time estimate**: UI now says "several minutes to hours" instead of "several minutes"
+- **Filter examples help text**: Clarified that disabled examples are replaced when regenerating
+
+## [2.1.0] - 2026-01-28
+
+### Added
+
+- **Filter keys allowlist**: Users can now select which metadata keys are used for filter generation via a new multiselect UI in the Filter Examples section
+- **Regenerate Examples button**: Manual control over when filter examples are regenerated (decoupled from metadata analysis)
+- **`regenerateFilterExamples` mutation**: New GraphQL mutation for on-demand filter example generation using only allowlisted keys
+
+### Changed
+
+- **Separated key discovery from example generation**: `analyzeMetadata` now only updates key library statistics; filter examples require explicit regeneration
+- **Automatic filter key cleanup**: When a metadata key is deleted, it's automatically removed from the filter keys allowlist
+
+### Fixed
+
+- **Bedrock client timeout consistency**: Filter example generation now uses same timeout config as other Bedrock calls (10s connect, 300s read)
+- **Safe dictionary access in filter generation**: Prevents KeyError when field analysis has missing keys
+- **FilterKeyInput error handling**: Added error state display and retry capability; filters out empty key names
+
+## [2.0.2] - 2026-01-28
+
+### Added
+
+- **Delete metadata keys from UI**: New delete button in Metadata Key Statistics table with confirmation modal
+- **`$listContains` filter operator**: Support for filtering on array fields (e.g., `surnames`, `people_mentioned`)
+- **Manual keys in filter generation**: When extraction mode is "manual", filter generator only sees configured keys
+
+### Fixed
+
+- **Reindex flow simplified**: Extract metadata first, create KB after, single baseline sync (removed redundant per-document API ingestion and finalize sync)
+- **Reindex URI parsing**: `_list_text_uris_for_reindex` now uses `document_id` directly instead of parsing from `output_s3_uri` (handles corrupted URIs)
+- **Metadata analyzer preserves counts**: No longer overwrites `occurrence_count` from ingestion with sample counts
+- **Manual keys in analyzer**: When extraction mode is "manual", only configured keys marked active
+- **Delete metadata key auth**: Added `@aws_api_key` directive and `DynamoDBCrudPolicy` for AppSync resolver
+- **Cache attribute typo**: Fixed `_cache_time` → `_active_keys_cache_time` in key library
+
+### Changed
+
+- **Multislice merge prioritizes filtered results**: Filtered slice results appear first, then guaranteed minimum from other slices
+- **Reindex state machine**: Removed `WaitForFinalizeSync` loop, sync happens once after all metadata extraction
+
+### Documentation
+
+- Promoted manual metadata keys workflow as recommended approach for better search results
+
+## [2.0.1] - 2026-01-27
+
+### Fixed
+
+- OCR fallback paths writing to `output/` instead of `content/` when `output_s3_uri` not set
+- Reindex state machine baseline sync using in-Lambda polling (2-minute limit) instead of Step Functions Wait+Poll loop
+- Reindex finalize timeout from in-Lambda polling exceeding Lambda limits — moved to Step Functions polling
+- Config table reindex lock using wrong partition key (`config_key` instead of `Configuration`)
+- Ingestion retry not catching "can't exceed" concurrent request throttle errors
+- Migration script missing `content_type` backfill for v1 records
+- Migration script using generic `media` content type instead of specific `video`/`audio` types
+- `listImages` query failing when any image has null `created_at` (`AWSDateTime!` non-nullable) — added fallback to `updated_at`
+- Multislice retriever merging results purely by score, causing filtered metadata matches to be buried by visual similarity matches
+- KB retrieval returning too few results due to Bedrock's stricter relevance cutoff at low `numberOfResults` values
+
+### Added
+
+- `scripts/copy_stack_data.py` for copying S3 and DynamoDB data between stacks
+- Baseline sync polling loop in reindex state machine (`WaitForSync` → `CheckSyncStatus` → `IsSyncComplete`)
+- Finalize sync polling loop in reindex state machine (`WaitForFinalizeSync` → `CheckFinalizeSyncStatus` → `IsFinalizeSyncComplete`)
+- `ServiceUnavailableException` retry handling in document ingestion
+- `handle_check_sync_status` and `handle_check_finalize_sync` actions in reindex Lambda
+- Guaranteed-minimum merge strategy for multislice retrieval — ensures each slice contributes at least 3 results before filling remaining slots by score
+- Baseline `.jpg.metadata.json` sidecars for images missing them (content_type, document_id, filename, surnames)
+
+### Changed
+
+- Document table filename column now wraps long names across multiple lines (Cloudscape `wrapLines` + CSS override)
+- KB retrieval `numberOfResults` increased from 5 to 25 for both chat and search to improve recall
+
+## [2.0.0] - 2026-01-10
+
+### Breaking Changes
+
+- **Single Data Source Architecture**: Consolidated from two S3 data sources to one
+  - S3 paths changed: `output/` and `images/` merged into `content/`
+  - All content types now use the same data source with `inclusionPrefixes: ["content/"]`
+  - Removed `TextDataSourceId` and `ImageDataSourceId` CloudFormation outputs
+  - Removed `TEXT_DATA_SOURCE_ID` and `IMAGE_DATA_SOURCE_ID` Lambda environment variables
+
+- **Unified Metadata Format**: All content now uses `.metadata.json` files
+  - Images switched from inline attributes (`IN_LINE_ATTRIBUTE`) to S3 files (`S3_LOCATION`)
+  - Image metadata now stored in `content/{imageId}/caption.txt.metadata.json`
+
+### Migration
+
+- **Migration script provided**: `scripts/migrate_v1_to_v2.py` handles S3 file copying and tracking table updates
+- **Reindex handles re-ingestion**: After migration, use Settings UI to trigger reindex with fresh metadata
+- See [docs/MIGRATION.md](docs/MIGRATION.md) for complete migration guide
+
+### Added
+
+- **`content_type` metadata field**: All content now includes a `content_type` field for filtering
+  - Documents: `content_type: "document"`
+  - Images: `content_type: "image"`
+  - Web pages: `content_type: "web_page"`
+- **Simplified query handlers**: Single unified query instead of dual data source queries
+- **Optional content_type filtering**: Query by content type using metadata filters
+- **Universal reindex**: Reindex now processes all content types (documents, images, scraped pages)
+- **Migration script**: `scripts/migrate_v1_to_v2.py` for migrating v1.x deployments
+
+### Removed
+
+- Dual data source architecture (`output/` and `images/` prefixes)
+- Multi-slice data source filtering by `x-amz-bedrock-kb-data-source-id`
+- `IN_LINE_ATTRIBUTE` metadata type for images
+
+### Changed
+
+- Increased default retrieval results from 5 to 10 for unified queries
+- Simplified MultiSliceRetriever to not require data_source_id parameter
+
+## [1.0.0] - Previous
+
+Initial release with dual data source architecture.

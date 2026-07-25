@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+.claude/*
+!.claude/agents/
+!.claude/skills/
+!.claude/skill-runs.json
+!.claude/SUBAGENTS_USAGE.md
+
+# AWS
+.aws-sam/
+layers/
+
+# Build artifacts - copied shared library
+src/lambda/*/ragstack_common/
+src/ragstack-mcp/.mcpregistry_github_token
+src/ragstack-mcp/.mcpregistry_registry_token
+
+# Node
+node_modules/
+npm-debug.log
+.env.local
+.env.amplify
+
+# Test coverage
+coverage/
+htmlcov/
+.nyc_output/
+*.lcov
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+TEST_FIXES_NEEDED.md
+
+# amplify
+.amplify
+amplify_outputs*
+amplifyconfiguration*
+amplify/data/config.ts
+.env
+ragstack-packaged.yaml
+
+# Generated files
+src/ragstack-chat/src/amplify-config.generated.ts
+.coverage

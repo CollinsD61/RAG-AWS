@@ -1,0 +1,20 @@
+# Core AWS SDK
+boto3>=1.43.36
+
+# PDF and image processing
+PyMuPDF>=1.27.2.3
+Pillow>=12.2.0
+
+# Web scraping dependencies
+httpx>=0.28.1
+beautifulsoup4>=4.15.0
+markdownify>=1.2.2
+lxml>=6.1.1
+
+# YAML parsing (used by text_extractors)
+PyYAML>=6.0.3
+
+# Text extraction
+python-docx>=1.2.0    # DOCX extraction
+openpyxl>=3.1.5       # XLSX extraction
+ebooklib>=0.20      # EPUB extraction

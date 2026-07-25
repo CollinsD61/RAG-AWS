@@ -1,0 +1,716 @@
+# RAGStack-Lambda GraphQL Schema
+
+type Query {
+  # Get document by ID
+  getDocument(documentId: ID!): Document @aws_api_key @aws_cognito_user_pools
+
+  # List all documents (returns all items, no pagination)
+  listDocuments: DocumentConnection @aws_api_key @aws_cognito_user_pools
+
+  # Get conversation history by ID (used for polling async chat results)
+  getConversation(conversationId: ID!): Conversation @aws_iam @aws_api_key @aws_cognito_user_pools
+
+  # Search Knowledge Base and return raw vector search results
+  # Accessible via IAM (unauthenticated), API key (server-side), or Cognito (admin UI)
+  searchKnowledgeBase(query: String!, maxResults: Int): KBQueryResult @aws_iam @aws_api_key @aws_cognito_user_pools
+
+  # Get system configuration (Schema, Default, and Custom) - read-only via API key
+  getConfiguration: ConfigurationResponse @aws_api_key @aws_cognito_user_pools
+
+  # Get scrape job by ID with pages
+  # Accessible via API key for external integrations, or Cognito for admin UI
+  getScrapeJob(jobId: ID!): ScrapeJobDetail @aws_api_key @aws_cognito_user_pools
+
+  # List all scrape jobs (paginated)
+  # Accessible via API key for external integrations, or Cognito for admin UI
+  listScrapeJobs(limit: Int, nextToken: String): ScrapeJobConnection @aws_api_key @aws_cognito_user_pools
+
+  # Check if a URL has been scraped before
+  # Accessible via API key for external integrations, or Cognito for admin UI
+  checkScrapeUrl(url: String!): ScrapeUrlCheck @aws_api_key @aws_cognito_user_pools
+
+  # Get image by ID
+  getImage(imageId: ID!): Image @aws_api_key @aws_cognito_user_pools
+
+  # List all images (paginated)
+  listImages(limit: Int, nextToken: String): ImageConnection @aws_api_key @aws_cognito_user_pools
+
+  # Get current API key (admin only)
+  getApiKey: ApiKeyResponse @aws_cognito_user_pools
+
+  # Get metadata key statistics from key library
+  getMetadataStats: MetadataStatsResponse @aws_api_key @aws_cognito_user_pools
+
+  # Get filter examples for metadata filtering
+  getFilterExamples: FilterExamplesResponse @aws_iam @aws_api_key @aws_cognito_user_pools
+
+  # Get key library for metadata key suggestions
+  getKeyLibrary: [MetadataKey] @aws_api_key @aws_cognito_user_pools
+
+  # Check if a proposed key is similar to existing keys
+  checkKeySimilarity(keyName: String!, threshold: Float): KeySimilarityResult @aws_api_key @aws_cognito_user_pools
+}
+
+type Mutation {
+  # Send a chat query to Knowledge Base (async - returns immediately, poll getConversation for result)
+  queryKnowledgeBase(query: String!, conversationId: ID!, requestId: ID!): ChatRequest @aws_iam @aws_api_key @aws_cognito_user_pools
+
+  # Create presigned URL for document upload
+  # Accessible via API key for external integrations, or Cognito for admin UI
+  createUploadUrl(filename: String!): UploadUrl @aws_iam @aws_api_key @aws_cognito_user_pools
+
+  # Manually trigger processing (if needed)
+  processDocument(documentId: ID!): Document @aws_api_key @aws_cognito_user_pools
+
+  # Update custom configuration
+  updateConfiguration(customConfig: AWSJSON!): Boolean @aws_cognito_user_pools
+
+  # Start a new web scraping job
+  # Accessible via API key for external integrations, or Cognito for admin UI
+  startScrape(input: StartScrapeInput!): ScrapeJob @aws_iam @aws_api_key @aws_cognito_user_pools
+
+  # Cancel an in-progress scrape job
+  # Accessible via API key for external integrations, or Cognito for admin UI
+  cancelScrape(jobId: ID!): ScrapeJob @aws_iam @aws_api_key @aws_cognito_user_pools
+
+  # Internal: Publish document status update (called by Lambda)
+  publishDocumentUpdate(
+    documentId: ID!
+    filename: String!
+    status: DocumentStatus!
+    totalPages: Int
+    errorMessage: String
+    updatedAt: String!
+  ): DocumentUpdate @aws_iam
+
+  # Internal: Publish scrape job status update (called by Lambda)
+  publishScrapeUpdate(
+    jobId: ID!
+    baseUrl: String!
+    title: String
+    status: ScrapeStatus!
+    totalUrls: Int!
+    processedCount: Int!
+    failedCount: Int!
+    updatedAt: String!
+  ): ScrapeUpdate @aws_iam
+
+  # Create presigned URL for image upload
+  # Accessible via API key for external integrations, or Cognito for admin UI
+  # autoProcess: If true, image will be captioned and indexed automatically after upload
+  # caption: Optional user-provided caption (if not provided and autoProcess=true, AI generates one)
+  createImageUploadUrl(filename: String!, autoProcess: Boolean, userCaption: String): ImageUploadUrl @aws_iam @aws_api_key @aws_cognito_user_pools
+
+  # Generate AI caption for an image using vision model
+  # Accessible via API key for external integrations, or Cognito for admin UI
+  generateCaption(imageS3Uri: String!): CaptionResult @aws_iam @aws_api_key @aws_cognito_user_pools
+
+  # Submit image with caption to finalize upload and trigger processing
+  # Accessible via API key for external integrations, or Cognito for admin UI
+  submitImage(input: SubmitImageInput!): Image @aws_iam @aws_api_key @aws_cognito_user_pools
+
+  # Delete an image from S3, DynamoDB, and Knowledge Base
+  deleteImage(imageId: ID!): Boolean @aws_api_key @aws_cognito_user_pools
+
+  # Delete documents from DynamoDB tracking table (batch delete)
+  # Note: Does not delete from S3 or Knowledge Base - those are cleaned up separately
+  deleteDocuments(documentIds: [ID!]!): DeleteDocumentsResult @aws_api_key @aws_cognito_user_pools
+
+  # Reprocess a document/image/media by triggering the appropriate pipeline
+  # Documents -> Step Functions, Images -> ProcessImageFunction, Media -> ProcessMediaFunction
+  reprocessDocument(documentId: ID!): ReprocessResult @aws_api_key @aws_cognito_user_pools
+
+  # Reindex a document - re-extract metadata from existing OCR text and reingest to KB
+  # Faster than reprocess since it skips OCR extraction
+  reindexDocument(documentId: ID!): ReprocessResult @aws_api_key @aws_cognito_user_pools
+
+  # Create presigned URL for ZIP archive upload (batch image upload)
+  # Accessible via API key for external integrations, or Cognito for admin UI
+  createZipUploadUrl(generateCaptions: Boolean): ZipUploadUrl @aws_iam @aws_api_key @aws_cognito_user_pools
+
+  # Regenerate API key (admin only) - creates new key and deletes old ones
+  regenerateApiKey: ApiKeyResponse @aws_cognito_user_pools
+
+  # Internal: Publish image status update (called by Lambda)
+  publishImageUpdate(
+    imageId: ID!
+    filename: String!
+    status: ImageStatus!
+    caption: String
+    errorMessage: String
+    updatedAt: String!
+  ): ImageUpdate @aws_iam
+
+  # Analyze metadata in Knowledge Base vectors
+  # Samples vectors, analyzes field occurrences, and updates key library statistics
+  analyzeMetadata: MetadataAnalysisResult @aws_api_key @aws_cognito_user_pools
+
+  # Regenerate filter examples using only the configured filter keys
+  regenerateFilterExamples: FilterExamplesResult @aws_api_key @aws_cognito_user_pools
+
+  # Delete a metadata key from the key library
+  deleteMetadataKey(keyName: String!): DeleteMetadataKeyResponse @aws_api_key @aws_cognito_user_pools
+
+  # Start Knowledge Base reindex operation (admin only)
+  # Creates new KB, regenerates metadata for all documents, migrates content, deletes old KB
+  startReindex: ReindexJob @aws_cognito_user_pools
+
+  # Internal: Publish reindex progress update (called by Lambda)
+  publishReindexUpdate(
+    status: ReindexStatus!
+    totalDocuments: Int!
+    processedCount: Int!
+    currentDocument: String
+    errorCount: Int!
+    errorMessages: [String!]
+    newKnowledgeBaseId: String
+    updatedAt: String!
+  ): ReindexUpdate @aws_iam
+}
+
+type Subscription {
+  # Subscribe to document status updates
+  onDocumentUpdate: DocumentUpdate
+    @aws_subscribe(mutations: ["publishDocumentUpdate"])
+    @aws_cognito_user_pools
+
+  # Subscribe to scrape job status updates
+  onScrapeUpdate: ScrapeUpdate
+    @aws_subscribe(mutations: ["publishScrapeUpdate"])
+    @aws_cognito_user_pools
+
+  # Subscribe to image status updates
+  onImageUpdate: ImageUpdate
+    @aws_subscribe(mutations: ["publishImageUpdate"])
+    @aws_cognito_user_pools
+
+  # Subscribe to reindex progress updates
+  onReindexUpdate: ReindexUpdate
+    @aws_subscribe(mutations: ["publishReindexUpdate"])
+    @aws_cognito_user_pools
+}
+
+# Real-time document update payload
+type DocumentUpdate @aws_iam @aws_cognito_user_pools {
+  documentId: ID!
+  filename: String!
+  status: DocumentStatus!
+  totalPages: Int
+  errorMessage: String
+  updatedAt: String!
+}
+
+# Real-time scrape update payload
+type ScrapeUpdate @aws_iam @aws_cognito_user_pools {
+  jobId: ID!
+  baseUrl: String!
+  title: String
+  status: ScrapeStatus!
+  totalUrls: Int!
+  processedCount: Int!
+  failedCount: Int!
+  updatedAt: String!
+}
+
+# Real-time image update payload
+type ImageUpdate @aws_iam @aws_cognito_user_pools {
+  imageId: ID!
+  filename: String!
+  status: ImageStatus!
+  caption: String
+  errorMessage: String
+  updatedAt: String!
+}
+
+# =========================================================================
+# KB Reindex Types
+# =========================================================================
+
+# Reindex operation status enum
+enum ReindexStatus {
+  PENDING
+  CREATING_KB
+  PROCESSING
+  UPDATING_LAMBDAS
+  DELETING_OLD_KB
+  COMPLETED
+  FAILED
+}
+
+# Real-time reindex progress update payload
+type ReindexUpdate @aws_iam @aws_cognito_user_pools {
+  status: ReindexStatus!
+  totalDocuments: Int!
+  processedCount: Int!
+  currentDocument: String
+  errorCount: Int!
+  errorMessages: [String!]
+  newKnowledgeBaseId: String
+  updatedAt: String!
+}
+
+# Reindex job response (returned from startReindex mutation)
+type ReindexJob @aws_cognito_user_pools {
+  executionArn: String!
+  status: ReindexStatus!
+  startedAt: String!
+}
+
+# Document type
+type Document @aws_api_key @aws_cognito_user_pools {
+  documentId: ID!
+  filename: String!
+  inputS3Uri: String!
+  outputS3Uri: String
+  status: DocumentStatus!
+  fileType: String
+  isTextNative: Boolean
+  totalPages: Int
+  errorMessage: String
+  createdAt: String
+  updatedAt: String
+  metadata: AWSJSON
+  previewUrl: String
+  # Content type: document, media, image, scrape
+  type: String
+  # For media files
+  mediaType: String
+  durationSeconds: Int
+}
+
+# Document status enum
+enum DocumentStatus {
+  PENDING
+  UPLOADED
+  PROCESSING
+  OCR_COMPLETE
+  EMBEDDING_COMPLETE
+  TRANSCRIBING
+  TRANSCRIBED
+  SYNC_QUEUED
+  INDEXED
+  FAILED
+  INGESTION_FAILED
+}
+
+# Paginated document list
+type DocumentConnection @aws_api_key @aws_cognito_user_pools {
+  items: [Document!]!
+  nextToken: String
+}
+
+# Delete documents result
+type DeleteDocumentsResult @aws_api_key @aws_cognito_user_pools {
+  deletedCount: Int!
+  failedIds: [ID!]
+  errors: [String!]
+}
+
+# Result of reprocessing a document
+type ReprocessResult @aws_api_key @aws_cognito_user_pools {
+  documentId: ID!
+  type: String!
+  status: String!
+  executionArn: String
+  error: String
+}
+
+# Upload URL response
+type UploadUrl @aws_api_key @aws_cognito_user_pools {
+  uploadUrl: String!
+  documentId: ID!
+  fields: AWSJSON
+}
+
+# Acknowledgment returned immediately from queryKnowledgeBase mutation
+type ChatRequest @aws_iam @aws_api_key @aws_cognito_user_pools {
+  conversationId: ID!
+  requestId: ID!
+  status: ChatStatus!
+}
+
+# Status of an individual chat turn
+enum ChatStatus {
+  PENDING
+  COMPLETED
+  ERROR
+}
+
+# A single conversation turn (message + response pair)
+type ConversationTurn @aws_iam @aws_api_key @aws_cognito_user_pools {
+  turnNumber: Int!
+  requestId: ID
+  status: ChatStatus!
+  userMessage: String!
+  assistantResponse: String
+  sources: [Source!]
+  error: String
+  createdAt: String!
+}
+
+# Full conversation with all turns
+type Conversation @aws_iam @aws_api_key @aws_cognito_user_pools {
+  conversationId: ID!
+  turns: [ConversationTurn!]!
+}
+
+# Source citation from Knowledge Base retrieval
+type Source @aws_iam @aws_api_key @aws_cognito_user_pools {
+  documentId: String!
+  pageNumber: Int
+  s3Uri: String!
+  snippet: String
+  documentUrl: String
+  documentAccessAllowed: Boolean
+  # Relevance score from KB (0-1)
+  score: Float
+  # Original filename
+  filename: String
+  # Scraped content fields
+  isScraped: Boolean
+  sourceUrl: String
+  # Image-specific fields
+  isImage: Boolean
+  thumbnailUrl: String
+  caption: String
+  # Media-specific fields (video/audio)
+  isMedia: Boolean
+  isSegment: Boolean  # true if this is a transcript segment
+  segmentUrl: String  # URL with #t=start,end for deep linking
+  mediaType: String  # "video" | "audio"
+  contentType: String  # "transcript" | "visual"
+  timestampStart: Int  # seconds
+  timestampEnd: Int  # seconds
+  timestampDisplay: String  # "1:30-2:00" formatted
+  speaker: String  # speaker label from transcription
+  segmentIndex: Int  # segment number (0-indexed)
+}
+
+# Knowledge Base search result (raw vector search)
+type KBQueryResult @aws_iam @aws_api_key @aws_cognito_user_pools {
+  query: String!
+  results: [KBResult!]!
+  total: Int
+  error: String
+  # Filter applied during retrieval (JSON string, null if no filter)
+  filterApplied: String
+}
+
+# Individual KB search result
+type KBResult @aws_iam @aws_api_key @aws_cognito_user_pools {
+  content: String!
+  source: String
+  score: Float
+  # Source access fields (same as Source type for chat)
+  documentId: String
+  filename: String
+  documentUrl: String
+  documentAccessAllowed: Boolean
+  # Content type indicators
+  isScraped: Boolean
+  sourceUrl: String
+  isImage: Boolean
+  thumbnailUrl: String
+  isMedia: Boolean
+  mediaType: String
+  # Segment fields (for video/audio clips)
+  isSegment: Boolean
+  segmentUrl: String
+  timestampStart: Float
+}
+
+# Configuration response containing Schema, Default, and Custom configs
+#
+# The Schema contains field metadata with these properties:
+# - type: Field data type (e.g., "string")
+# - enum: Array of allowed values for dropdown fields
+# - description: Human-readable field label
+# - order: Display order in UI (lower numbers first)
+# - dependsOn: Optional conditional rendering {field, value}
+#
+# Configurable fields:
+# 1. ocr_backend: Choose between "textract" or "bedrock" for OCR processing
+# 2. bedrock_ocr_model_id: Claude model selection for Bedrock OCR (conditional on ocr_backend="bedrock")
+# 3. chat_model_id: Model selection for Knowledge Base chat queries (Nova/Claude options)
+#
+# Note: Embedding models are hardcoded to Titan defaults and not user-configurable.
+type ConfigurationResponse @aws_cognito_user_pools {
+  Schema: AWSJSON
+  Default: AWSJSON
+  Custom: AWSJSON
+}
+
+# API Key response (admin only)
+type ApiKeyResponse @aws_cognito_user_pools {
+  apiKey: String!
+  id: String!
+  expires: String!
+  error: String
+}
+
+# =========================================================================
+# Image Types
+# =========================================================================
+
+# Image status enum
+enum ImageStatus {
+  PENDING
+  PROCESSING
+  SYNC_QUEUED
+  INDEXED
+  FAILED
+  INGESTION_FAILED
+}
+
+# Image type
+type Image @aws_api_key @aws_cognito_user_pools {
+  imageId: ID!
+  filename: String!
+  caption: String
+  userCaption: String
+  aiCaption: String
+  status: ImageStatus!
+  s3Uri: String!
+  thumbnailUrl: String
+  contentType: String
+  fileSize: Int
+  errorMessage: String
+  # Extracted text from OCR (if extractText was enabled)
+  extractedText: String
+  # Extracted metadata from image analysis
+  extractedMetadata: AWSJSON
+  # Presigned URL to caption.txt for preview
+  captionUrl: String
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+}
+
+# Paginated image list
+type ImageConnection @aws_api_key @aws_cognito_user_pools {
+  items: [Image!]!
+  nextToken: String
+}
+
+# Image upload URL response
+type ImageUploadUrl @aws_api_key @aws_cognito_user_pools {
+  uploadUrl: String!
+  imageId: ID!
+  s3Uri: String!
+  fields: AWSJSON
+}
+
+# Caption generation result
+type CaptionResult @aws_api_key @aws_cognito_user_pools {
+  caption: String
+  error: String
+}
+
+# ZIP upload URL response
+type ZipUploadUrl @aws_api_key @aws_cognito_user_pools {
+  uploadUrl: String!
+  uploadId: ID!
+  fields: AWSJSON
+}
+
+# Input for submitting image with caption
+input SubmitImageInput {
+  imageId: ID!
+  caption: String
+  userCaption: String
+  aiCaption: String
+  # If true, extract visible text from image using vision model (OCR)
+  extractText: Boolean
+}
+
+# =========================================================================
+# Scrape Types
+# =========================================================================
+
+# Scrape job status enum
+enum ScrapeStatus {
+  PENDING
+  DISCOVERING
+  PROCESSING
+  COMPLETED
+  COMPLETED_WITH_ERRORS
+  FAILED
+  CANCELLED
+}
+
+# URL scope enforcement for crawling
+# - SUBPAGES: Only URLs under the base path
+# - HOSTNAME: Any URL on the same hostname
+# - DOMAIN: Any URL on the same domain (includes subdomains)
+enum ScrapeScope {
+  SUBPAGES
+  HOSTNAME
+  DOMAIN
+}
+
+# Scrape mode for content fetching
+# - FAST: HTTP fetch only
+# - FULL: Always use Playwright
+# - AUTO: Auto-detect based on content
+enum ScrapeMode {
+  FAST
+  FULL
+  AUTO
+}
+
+# Scrape job configuration
+type ScrapeConfig @aws_api_key @aws_cognito_user_pools {
+  maxPages: Int!
+  maxDepth: Int!
+  scope: ScrapeScope!
+  includePatterns: [String!]
+  excludePatterns: [String!]
+  scrapeMode: ScrapeMode
+  cookies: String
+  forceRescrape: Boolean
+}
+
+# Input for starting a scrape job
+input StartScrapeInput {
+  url: String!
+  maxPages: Int
+  maxDepth: Int
+  scope: ScrapeScope
+  includePatterns: [String!]
+  excludePatterns: [String!]
+  scrapeMode: ScrapeMode
+  cookies: String
+  forceRescrape: Boolean
+}
+
+# Scrape job type
+type ScrapeJob @aws_api_key @aws_cognito_user_pools {
+  jobId: ID!
+  baseUrl: String!
+  title: String
+  status: ScrapeStatus!
+  config: ScrapeConfig!
+  totalUrls: Int!
+  processedCount: Int!
+  failedCount: Int!
+  failedUrls: [String!]
+  jobMetadata: AWSJSON
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+}
+
+# Scrape job with pages
+type ScrapeJobDetail @aws_api_key @aws_cognito_user_pools {
+  job: ScrapeJob!
+  pages: [ScrapePage!]!
+}
+
+# Individual scraped page
+type ScrapePage @aws_api_key @aws_cognito_user_pools {
+  url: String!
+  title: String
+  status: String!
+  documentId: ID
+  contentUrl: String
+  error: String
+  depth: Int!
+}
+
+# Paginated scrape job list
+type ScrapeJobConnection @aws_api_key @aws_cognito_user_pools {
+  items: [ScrapeJob!]!
+  nextToken: String
+}
+
+# URL check result for duplicate detection
+type ScrapeUrlCheck @aws_api_key @aws_cognito_user_pools {
+  exists: Boolean!
+  lastScrapedAt: AWSDateTime
+  jobId: ID
+  title: String
+}
+
+# =========================================================================
+# Metadata Analysis Types
+# =========================================================================
+
+# Metadata analysis result
+type MetadataAnalysisResult @aws_cognito_user_pools {
+  success: Boolean!
+  vectorsSampled: Int!
+  keysAnalyzed: Int!
+  examplesGenerated: Int!
+  executionTimeMs: Int!
+  error: String
+}
+
+# Filter examples regeneration result
+type FilterExamplesResult @aws_api_key @aws_cognito_user_pools {
+  success: Boolean!
+  examplesGenerated: Int!
+  executionTimeMs: Int!
+  error: String
+}
+
+# Delete metadata key response
+type DeleteMetadataKeyResponse @aws_api_key @aws_cognito_user_pools {
+  success: Boolean!
+  keyName: String!
+  error: String
+}
+
+# Metadata statistics response
+type MetadataStatsResponse @aws_api_key @aws_cognito_user_pools {
+  keys: [MetadataKeyStats!]!
+  totalKeys: Int!
+  lastAnalyzed: String
+  error: String
+}
+
+# Individual metadata key statistics
+type MetadataKeyStats @aws_api_key @aws_cognito_user_pools {
+  keyName: String!
+  dataType: String!
+  occurrenceCount: Int!
+  sampleValues: [String!]
+  lastAnalyzed: String
+  status: String
+}
+
+# Filter examples response
+type FilterExamplesResponse @aws_iam @aws_api_key @aws_cognito_user_pools {
+  examples: [FilterExample!]!
+  totalExamples: Int!
+  lastGenerated: String
+  error: String
+}
+
+# Individual filter example
+type FilterExample @aws_iam @aws_api_key @aws_cognito_user_pools {
+  name: String!
+  description: String!
+  useCase: String!
+  filter: AWSJSON!
+}
+
+# Metadata key from key library (for suggestions)
+type MetadataKey @aws_api_key @aws_cognito_user_pools {
+  keyName: String!
+  dataType: String!
+  occurrenceCount: Int!
+  sampleValues: [String!]
+  status: String
+}
+
+# Key similarity check result
+type KeySimilarityResult @aws_api_key @aws_cognito_user_pools {
+  proposedKey: String!
+  similarKeys: [SimilarKey!]!
+  hasSimilar: Boolean!
+}
+
+# Similar key with similarity score
+type SimilarKey @aws_api_key @aws_cognito_user_pools {
+  keyName: String!
+  similarity: Float!
+  occurrenceCount: Int!
+}

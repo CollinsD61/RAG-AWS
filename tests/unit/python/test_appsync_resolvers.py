@@ -1,0 +1,1395 @@
+"""Unit tests for AppSync resolver Lambda handlers."""
+
+import importlib.util
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+def _load_appsync_resolvers_module():
+    """Load appsync_resolvers module using importlib (avoids 'lambda' keyword issue)."""
+    module_dir = Path(__file__).parent.parent.parent.parent / "src/lambda/appsync_resolvers"
+    module_path = module_dir / "index.py"
+    # Add the appsync_resolvers directory to sys.path so resolver subpackage imports work
+    dir_str = str(module_dir)
+    if dir_str not in sys.path:
+        sys.path.insert(0, dir_str)
+    # Clear cached resolver modules so they pick up fresh boto3 mocks on each reload
+    for mod_name in list(sys.modules):
+        if mod_name.startswith("resolvers"):
+            del sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location("appsync_resolvers_index", module_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["appsync_resolvers_index"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _patch_resolver_clients(module, mock_boto3):
+    """Patch boto3 clients in both index.py and resolver submodules.
+
+    Tests set module.s3 = mock, but domain modules import from resolvers.shared.
+    This helper propagates mocked clients to all loaded resolver modules.
+    """
+    module.s3 = mock_boto3["s3"]
+    module.dynamodb = mock_boto3["dynamodb"]
+
+    # Also patch the shared module used by domain resolver modules
+    import resolvers.shared as shared
+
+    shared.s3 = mock_boto3["s3"]
+    shared.dynamodb = mock_boto3["dynamodb"]
+
+    # Patch domain modules that have already imported these clients
+    for mod_name in list(sys.modules):
+        if mod_name.startswith("resolvers.") and mod_name != "resolvers.shared":
+            mod = sys.modules[mod_name]
+            if hasattr(mod, "s3"):
+                mod.s3 = mock_boto3["s3"]
+            if hasattr(mod, "dynamodb"):
+                mod.dynamodb = mock_boto3["dynamodb"]
+
+
+@pytest.fixture
+def mock_env(monkeypatch):
+    """Set up environment variables for tests."""
+    monkeypatch.setenv("TRACKING_TABLE", "test-tracking-table")
+    monkeypatch.setenv("DATA_BUCKET", "test-data-bucket")
+    monkeypatch.setenv("STATE_MACHINE_ARN", "arn:aws:states:us-east-1:123:stateMachine:test")
+    monkeypatch.setenv("CONFIGURATION_TABLE_NAME", "test-config-table")
+    monkeypatch.setenv(
+        "PROCESS_IMAGE_FUNCTION_ARN",
+        "arn:aws:lambda:us-east-1:123:function:test-process-image",
+    )
+    # Patch check_public_access to always allow access in tests
+    with patch("ragstack_common.auth.check_public_access", return_value=(True, None)):
+        yield
+
+
+@pytest.fixture
+def mock_boto3():
+    """Set up mocked boto3 clients and resources."""
+    with patch("boto3.client") as mock_client, patch("boto3.resource") as mock_resource:
+        # Mock S3 client
+        mock_s3 = MagicMock()
+        mock_s3.generate_presigned_post.return_value = {
+            "url": "https://test-bucket.s3.amazonaws.com/",
+            "fields": {"key": "test-key", "policy": "test-policy"},
+        }
+
+        # Mock DynamoDB resource
+        mock_table = MagicMock()
+        mock_dynamodb = MagicMock()
+        mock_dynamodb.Table.return_value = mock_table
+
+        def client_factory(service, **kwargs):
+            if service == "s3":
+                return mock_s3
+            if service == "stepfunctions":
+                return MagicMock()
+            return MagicMock()
+
+        mock_client.side_effect = client_factory
+        mock_resource.return_value = mock_dynamodb
+
+        yield {
+            "s3": mock_s3,
+            "dynamodb": mock_dynamodb,
+            "table": mock_table,
+        }
+
+
+# =============================================================================
+# Image Upload URL Resolver Tests
+# =============================================================================
+
+
+class TestCreateImageUploadUrl:
+    """Tests for createImageUploadUrl resolver."""
+
+    def test_create_image_upload_url_png(self, mock_env, mock_boto3):
+        """Test successful image upload URL creation for PNG file."""
+        module = _load_appsync_resolvers_module()
+
+        # Reinitialize module-level variables with mocked values
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "createImageUploadUrl"},
+            "arguments": {"filename": "test-image.png"},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        # Verify response structure
+        assert "uploadUrl" in result
+        assert "imageId" in result
+        assert "fields" in result
+        assert result["uploadUrl"] == "https://test-bucket.s3.amazonaws.com/"
+
+        # Verify S3 presigned URL was requested with content/ prefix
+        mock_boto3["s3"].generate_presigned_post.assert_called_once()
+        call_kwargs = mock_boto3["s3"].generate_presigned_post.call_args.kwargs
+        assert call_kwargs["Key"].startswith("content/")
+        assert call_kwargs["Key"].endswith("/test-image.png")
+
+        # Verify DynamoDB record was created
+        mock_boto3["table"].put_item.assert_called_once()
+        put_args = mock_boto3["table"].put_item.call_args.kwargs["Item"]
+        assert put_args["type"] == "image"
+        assert put_args["status"] == "PENDING"
+        assert put_args["filename"] == "test-image.png"
+
+    def test_create_image_upload_url_jpg(self, mock_env, mock_boto3):
+        """Test successful image upload URL creation for JPG file."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "createImageUploadUrl"},
+            "arguments": {"filename": "photo.jpg"},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert "imageId" in result
+        call_kwargs = mock_boto3["s3"].generate_presigned_post.call_args.kwargs
+        assert call_kwargs["Key"].endswith("/photo.jpg")
+
+    def test_create_image_upload_url_gif(self, mock_env, mock_boto3):
+        """Test successful image upload URL creation for GIF file."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "createImageUploadUrl"},
+            "arguments": {"filename": "animation.gif"},
+        }
+
+        result = module.lambda_handler(event, None)
+        assert "imageId" in result
+
+    def test_create_image_upload_url_webp(self, mock_env, mock_boto3):
+        """Test successful image upload URL creation for WebP file."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "createImageUploadUrl"},
+            "arguments": {"filename": "modern.webp"},
+        }
+
+        result = module.lambda_handler(event, None)
+        assert "imageId" in result
+
+    def test_create_image_upload_url_reject_pdf(self, mock_env, mock_boto3):
+        """Test rejection of non-image file (PDF)."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "createImageUploadUrl"},
+            "arguments": {"filename": "document.pdf"},
+        }
+
+        with pytest.raises(ValueError, match="Unsupported"):
+            module.lambda_handler(event, None)
+
+    def test_create_image_upload_url_reject_doc(self, mock_env, mock_boto3):
+        """Test rejection of non-image file (DOC)."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "createImageUploadUrl"},
+            "arguments": {"filename": "document.doc"},
+        }
+
+        with pytest.raises(ValueError, match="Unsupported"):
+            module.lambda_handler(event, None)
+
+    def test_create_image_upload_url_reject_path_traversal(self, mock_env, mock_boto3):
+        """Test rejection of filename with path traversal."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "createImageUploadUrl"},
+            "arguments": {"filename": "../../../etc/passwd.png"},
+        }
+
+        with pytest.raises(ValueError, match="invalid characters"):
+            module.lambda_handler(event, None)
+
+    def test_create_image_upload_url_reject_forward_slash(self, mock_env, mock_boto3):
+        """Test rejection of filename with forward slash."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "createImageUploadUrl"},
+            "arguments": {"filename": "path/to/image.png"},
+        }
+
+        with pytest.raises(ValueError, match="invalid characters"):
+            module.lambda_handler(event, None)
+
+    def test_create_image_upload_url_reject_long_filename(self, mock_env, mock_boto3):
+        """Test rejection of filename exceeding max length."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        long_filename = "a" * 256 + ".png"
+        event = {
+            "info": {"fieldName": "createImageUploadUrl"},
+            "arguments": {"filename": long_filename},
+        }
+
+        with pytest.raises(ValueError, match="255 characters"):
+            module.lambda_handler(event, None)
+
+    def test_create_image_upload_url_reject_empty_filename(self, mock_env, mock_boto3):
+        """Test rejection of empty filename."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "createImageUploadUrl"},
+            "arguments": {"filename": ""},
+        }
+
+        with pytest.raises(ValueError, match="must be between"):
+            module.lambda_handler(event, None)
+
+    def test_create_image_upload_url_case_insensitive(self, mock_env, mock_boto3):
+        """Test that file extension check is case insensitive."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "createImageUploadUrl"},
+            "arguments": {"filename": "UPPERCASE.PNG"},
+        }
+
+        result = module.lambda_handler(event, None)
+        assert "imageId" in result
+
+    def test_create_image_upload_url_jpeg_extension(self, mock_env, mock_boto3):
+        """Test successful image upload URL creation for JPEG extension."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "createImageUploadUrl"},
+            "arguments": {"filename": "photo.jpeg"},
+        }
+
+        result = module.lambda_handler(event, None)
+        assert "imageId" in result
+
+
+# =============================================================================
+# Generate Caption Resolver Tests
+# =============================================================================
+
+
+class TestGenerateCaption:
+    """Tests for generateCaption resolver."""
+
+    def test_generate_caption_success(self, mock_env, mock_boto3):
+        """Test successful caption generation."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        # Mock S3 get_object
+        mock_body = MagicMock()
+        mock_body.read.return_value = b"\x89PNG\r\n\x1a\n" + b"fake image data"
+        mock_boto3["s3"].get_object.return_value = {
+            "Body": mock_body,
+            "ContentType": "image/png",
+        }
+
+        # Mock bedrock_runtime.converse
+        mock_bedrock = MagicMock()
+        mock_bedrock.converse.return_value = {
+            "output": {
+                "message": {"content": [{"text": "A beautiful sunset over the ocean with clouds."}]}
+            }
+        }
+        module.bedrock_runtime = mock_bedrock
+        # Also patch in resolver submodules
+        import resolvers.shared as shared
+
+        shared.bedrock_runtime = mock_bedrock
+        if "resolvers.images" in sys.modules:
+            sys.modules["resolvers.images"].bedrock_runtime = mock_bedrock
+
+        event = {
+            "info": {"fieldName": "generateCaption"},
+            "arguments": {"imageS3Uri": "s3://test-data-bucket/content/123/image.png"},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert result["caption"] == "A beautiful sunset over the ocean with clouds."
+        assert result["error"] is None
+
+        # Verify S3 was called correctly
+        mock_boto3["s3"].get_object.assert_called_once_with(
+            Bucket="test-data-bucket", Key="content/123/image.png"
+        )
+
+        # Verify Bedrock Converse was called
+        mock_bedrock.converse.assert_called_once()
+
+    def test_generate_caption_invalid_s3_uri_format(self, mock_env, mock_boto3):
+        """Test rejection of invalid S3 URI format."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "generateCaption"},
+            "arguments": {"imageS3Uri": "https://example.com/image.png"},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert result["caption"] is None
+        assert "Invalid S3 URI" in result["error"]
+
+    def test_generate_caption_empty_s3_uri(self, mock_env, mock_boto3):
+        """Test rejection of empty S3 URI."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "generateCaption"},
+            "arguments": {"imageS3Uri": ""},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert result["caption"] is None
+        assert "Invalid S3 URI" in result["error"]
+
+    def test_generate_caption_wrong_bucket(self, mock_env, mock_boto3):
+        """Test rejection of image from unauthorized bucket."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "generateCaption"},
+            "arguments": {"imageS3Uri": "s3://other-bucket/content/123/image.png"},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert result["caption"] is None
+        assert "configured data bucket" in result["error"]
+
+    def test_generate_caption_s3_not_found(self, mock_env, mock_boto3):
+        """Test handling of S3 NoSuchKey error."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        # Mock S3 to raise NoSuchKey
+        from botocore.exceptions import ClientError
+
+        mock_boto3["s3"].get_object.side_effect = ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": "Not Found"}}, "GetObject"
+        )
+
+        event = {
+            "info": {"fieldName": "generateCaption"},
+            "arguments": {"imageS3Uri": "s3://test-data-bucket/content/123/image.png"},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert result["caption"] is None
+        assert "not found" in result["error"]
+
+    def test_generate_caption_bedrock_error(self, mock_env, mock_boto3):
+        """Test handling of Bedrock API error."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        # Mock S3 get_object
+        mock_body = MagicMock()
+        mock_body.read.return_value = b"\x89PNG\r\n\x1a\n" + b"fake image data"
+        mock_boto3["s3"].get_object.return_value = {
+            "Body": mock_body,
+            "ContentType": "image/png",
+        }
+
+        # Mock bedrock_runtime to raise error
+        from botocore.exceptions import ClientError
+
+        mock_bedrock = MagicMock()
+        mock_bedrock.converse.side_effect = ClientError(
+            {"Error": {"Code": "ValidationException", "Message": "Model error"}},
+            "Converse",
+        )
+        module.bedrock_runtime = mock_bedrock
+        # Also patch in resolver submodules
+        import resolvers.shared as shared
+
+        shared.bedrock_runtime = mock_bedrock
+        if "resolvers.images" in sys.modules:
+            sys.modules["resolvers.images"].bedrock_runtime = mock_bedrock
+
+        event = {
+            "info": {"fieldName": "generateCaption"},
+            "arguments": {"imageS3Uri": "s3://test-data-bucket/content/123/image.png"},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert result["caption"] is None
+        assert "Model error" in result["error"]
+
+
+# =============================================================================
+# Submit Image Resolver Tests
+# =============================================================================
+
+
+class TestSubmitImage:
+    """Tests for submitImage resolver."""
+
+    def test_submit_image_success(self, mock_env, mock_boto3):
+        """Test successful image submission with both captions."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        # Setup DynamoDB mocks
+        mock_boto3["table"].get_item.return_value = {
+            "Item": {
+                "document_id": "12345678-1234-1234-1234-123456789012",
+                "filename": "test.png",
+                "input_s3_uri": "s3://test-data-bucket/content/12345678-1234-1234-1234-123456789012/test.png",
+                "status": "PENDING",
+                "type": "image",
+                "created_at": "2025-01-01T00:00:00Z",
+            }
+        }
+
+        # Setup S3 mocks
+        mock_boto3["s3"].head_object.return_value = {
+            "ContentType": "image/png",
+            "ContentLength": 12345,
+        }
+
+        event = {
+            "info": {"fieldName": "submitImage"},
+            "arguments": {
+                "input": {
+                    "imageId": "12345678-1234-1234-1234-123456789012",
+                    "userCaption": "My vacation photo",
+                    "aiCaption": "A sunset over the ocean",
+                }
+            },
+        }
+
+        result = module.lambda_handler(event, None)
+
+        # Verify result structure
+        assert result["imageId"] == "12345678-1234-1234-1234-123456789012"
+        assert result["status"] == "PENDING"  # From mock return
+
+        # Note: metadata.json no longer written to S3 - all data stored in DynamoDB
+        # This prevents KB from incorrectly indexing the metadata file
+
+        # Verify DynamoDB was updated with caption data
+        mock_boto3["table"].update_item.assert_called_once()
+
+    def test_submit_image_user_caption_only(self, mock_env, mock_boto3):
+        """Test submission with only user caption."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].get_item.return_value = {
+            "Item": {
+                "document_id": "12345678-1234-1234-1234-123456789012",
+                "filename": "test.png",
+                "input_s3_uri": "s3://test-data-bucket/content/12345678-1234-1234-1234-123456789012/test.png",
+                "status": "PENDING",
+                "type": "image",
+            }
+        }
+
+        mock_boto3["s3"].head_object.return_value = {
+            "ContentType": "image/png",
+            "ContentLength": 12345,
+        }
+
+        event = {
+            "info": {"fieldName": "submitImage"},
+            "arguments": {
+                "input": {
+                    "imageId": "12345678-1234-1234-1234-123456789012",
+                    "userCaption": "Just a user caption",
+                }
+            },
+        }
+
+        result = module.lambda_handler(event, None)
+        assert "imageId" in result
+
+    def test_submit_image_not_found(self, mock_env, mock_boto3):
+        """Test rejection when image not found."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].get_item.return_value = {}  # No Item
+
+        event = {
+            "info": {"fieldName": "submitImage"},
+            "arguments": {
+                "input": {
+                    "imageId": "12345678-1234-1234-1234-123456789012",
+                }
+            },
+        }
+
+        with pytest.raises(ValueError, match="not found"):
+            module.lambda_handler(event, None)
+
+    def test_submit_image_not_image_type(self, mock_env, mock_boto3):
+        """Test rejection when record is not an image type."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].get_item.return_value = {
+            "Item": {
+                "document_id": "12345678-1234-1234-1234-123456789012",
+                "filename": "document.pdf",
+                "input_s3_uri": "s3://test-data-bucket/input/123/document.pdf",
+                "status": "UPLOADED",
+                "type": "document",  # Not an image
+            }
+        }
+
+        event = {
+            "info": {"fieldName": "submitImage"},
+            "arguments": {
+                "input": {
+                    "imageId": "12345678-1234-1234-1234-123456789012",
+                }
+            },
+        }
+
+        with pytest.raises(ValueError, match="not an image"):
+            module.lambda_handler(event, None)
+
+    def test_submit_image_wrong_status(self, mock_env, mock_boto3):
+        """Test rejection when image not in PENDING status."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].get_item.return_value = {
+            "Item": {
+                "document_id": "12345678-1234-1234-1234-123456789012",
+                "filename": "test.png",
+                "input_s3_uri": "s3://test-data-bucket/content/123/test.png",
+                "status": "PROCESSING",  # Already processing
+                "type": "image",
+            }
+        }
+
+        event = {
+            "info": {"fieldName": "submitImage"},
+            "arguments": {
+                "input": {
+                    "imageId": "12345678-1234-1234-1234-123456789012",
+                }
+            },
+        }
+
+        with pytest.raises(ValueError, match="PENDING"):
+            module.lambda_handler(event, None)
+
+    def test_submit_image_s3_file_not_found(self, mock_env, mock_boto3):
+        """Test rejection when image file not in S3."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].get_item.return_value = {
+            "Item": {
+                "document_id": "12345678-1234-1234-1234-123456789012",
+                "filename": "test.png",
+                "input_s3_uri": "s3://test-data-bucket/content/123/test.png",
+                "status": "PENDING",
+                "type": "image",
+            }
+        }
+
+        # Mock S3 to raise NoSuchKey
+        from botocore.exceptions import ClientError
+
+        mock_boto3["s3"].head_object.side_effect = ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": "Not Found"}}, "HeadObject"
+        )
+
+        event = {
+            "info": {"fieldName": "submitImage"},
+            "arguments": {
+                "input": {
+                    "imageId": "12345678-1234-1234-1234-123456789012",
+                    "userCaption": "Test caption",
+                }
+            },
+        }
+
+        with pytest.raises(ValueError, match="not found in S3"):
+            module.lambda_handler(event, None)
+
+    def test_submit_image_missing_image_id(self, mock_env, mock_boto3):
+        """Test rejection when imageId is missing."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "submitImage"},
+            "arguments": {"input": {}},
+        }
+
+        with pytest.raises(ValueError, match="required"):
+            module.lambda_handler(event, None)
+
+    def test_submit_image_invalid_uuid(self, mock_env, mock_boto3):
+        """Test rejection when imageId is not a valid UUID."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "submitImage"},
+            "arguments": {
+                "input": {
+                    "imageId": "not-a-uuid",
+                }
+            },
+        }
+
+        with pytest.raises(ValueError, match="Invalid"):
+            module.lambda_handler(event, None)
+
+
+# =============================================================================
+# Get Image Resolver Tests
+# =============================================================================
+
+
+class TestGetImage:
+    """Tests for getImage resolver."""
+
+    def test_get_image_success(self, mock_env, mock_boto3):
+        """Test successful image retrieval."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].get_item.return_value = {
+            "Item": {
+                "document_id": "12345678-1234-1234-1234-123456789012",
+                "filename": "test.png",
+                "caption": "Test caption",
+                "input_s3_uri": "s3://test-bucket/content/123/test.png",
+                "status": "INDEXED",
+                "type": "image",
+            }
+        }
+
+        event = {
+            "info": {"fieldName": "getImage"},
+            "arguments": {"imageId": "12345678-1234-1234-1234-123456789012"},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert result["imageId"] == "12345678-1234-1234-1234-123456789012"
+        assert result["filename"] == "test.png"
+        assert result["caption"] == "Test caption"
+
+    def test_get_image_not_found(self, mock_env, mock_boto3):
+        """Test image not found returns None."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].get_item.return_value = {}
+
+        event = {
+            "info": {"fieldName": "getImage"},
+            "arguments": {"imageId": "12345678-1234-1234-1234-123456789012"},
+        }
+
+        result = module.lambda_handler(event, None)
+        assert result is None
+
+    def test_get_image_not_image_type(self, mock_env, mock_boto3):
+        """Test returns None for non-image type."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].get_item.return_value = {
+            "Item": {
+                "document_id": "12345678-1234-1234-1234-123456789012",
+                "type": "document",  # Not image
+            }
+        }
+
+        event = {
+            "info": {"fieldName": "getImage"},
+            "arguments": {"imageId": "12345678-1234-1234-1234-123456789012"},
+        }
+
+        result = module.lambda_handler(event, None)
+        assert result is None
+
+    def test_get_image_invalid_uuid(self, mock_env, mock_boto3):
+        """Test rejection of invalid UUID."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "getImage"},
+            "arguments": {"imageId": "not-a-uuid"},
+        }
+
+        with pytest.raises(ValueError, match="Invalid"):
+            module.lambda_handler(event, None)
+
+
+# =============================================================================
+# List Images Resolver Tests
+# =============================================================================
+
+
+class TestListImages:
+    """Tests for listImages resolver."""
+
+    def test_list_images_success(self, mock_env, mock_boto3):
+        """Test successful image listing."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].scan.return_value = {
+            "Items": [
+                {
+                    "document_id": "image-1",
+                    "filename": "test1.png",
+                    "type": "image",
+                    "status": "INDEXED",
+                    "input_s3_uri": "s3://test/1.png",
+                },
+                {
+                    "document_id": "image-2",
+                    "filename": "test2.jpg",
+                    "type": "image",
+                    "status": "PENDING",
+                    "input_s3_uri": "s3://test/2.jpg",
+                },
+            ]
+        }
+
+        event = {
+            "info": {"fieldName": "listImages"},
+            "arguments": {"limit": 10},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert len(result["items"]) == 2
+        assert result["items"][0]["imageId"] == "image-1"
+        assert result["items"][1]["imageId"] == "image-2"
+
+    def test_list_images_with_pagination(self, mock_env, mock_boto3):
+        """Test listing with pagination token."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        # Mock returns 1 item without LastEvaluatedKey (final page)
+        mock_boto3["table"].scan.return_value = {
+            "Items": [
+                {
+                    "document_id": "image-3",
+                    "filename": "test3.png",
+                    "type": "image",
+                    "status": "INDEXED",
+                    "input_s3_uri": "s3://test/3.png",
+                }
+            ],
+            # No LastEvaluatedKey = final page
+        }
+
+        event = {
+            "info": {"fieldName": "listImages"},
+            "arguments": {"limit": 10, "nextToken": '{"document_id": "image-2"}'},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert len(result["items"]) == 1
+        # No nextToken since this is the last page
+        assert "nextToken" not in result
+
+    def test_list_images_invalid_limit(self, mock_env, mock_boto3):
+        """Test rejection of invalid limit."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "listImages"},
+            "arguments": {"limit": 200},  # Over max
+        }
+
+        with pytest.raises(ValueError, match="must be between"):
+            module.lambda_handler(event, None)
+
+
+# =============================================================================
+# Delete Image Resolver Tests
+# =============================================================================
+
+
+class TestDeleteImage:
+    """Tests for deleteImage resolver."""
+
+    def test_delete_image_success(self, mock_env, mock_boto3):
+        """Test successful image deletion."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].get_item.return_value = {
+            "Item": {
+                "document_id": "12345678-1234-1234-1234-123456789012",
+                "filename": "test.png",
+                "input_s3_uri": "s3://test-bucket/content/123/test.png",
+                "type": "image",
+            }
+        }
+
+        event = {
+            "info": {"fieldName": "deleteImage"},
+            "arguments": {"imageId": "12345678-1234-1234-1234-123456789012"},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert result is True
+
+        # Verify S3 objects were deleted
+        assert mock_boto3["s3"].delete_object.called
+
+        # Verify DynamoDB delete was called
+        mock_boto3["table"].delete_item.assert_called_once()
+
+    def test_delete_image_not_found(self, mock_env, mock_boto3):
+        """Test error when image not found."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].get_item.return_value = {}
+
+        event = {
+            "info": {"fieldName": "deleteImage"},
+            "arguments": {"imageId": "12345678-1234-1234-1234-123456789012"},
+        }
+
+        with pytest.raises(ValueError, match="not found"):
+            module.lambda_handler(event, None)
+
+    def test_delete_image_not_image_type(self, mock_env, mock_boto3):
+        """Test error when record is not an image."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].get_item.return_value = {
+            "Item": {
+                "document_id": "12345678-1234-1234-1234-123456789012",
+                "type": "document",
+            }
+        }
+
+        event = {
+            "info": {"fieldName": "deleteImage"},
+            "arguments": {"imageId": "12345678-1234-1234-1234-123456789012"},
+        }
+
+        with pytest.raises(ValueError, match="not an image"):
+            module.lambda_handler(event, None)
+
+    def test_delete_image_missing_id(self, mock_env, mock_boto3):
+        """Test error when imageId is missing."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "deleteImage"},
+            "arguments": {},
+        }
+
+        with pytest.raises(ValueError, match="required"):
+            module.lambda_handler(event, None)
+
+
+# =============================================================================
+# Get Key Library Resolver Tests
+# =============================================================================
+
+
+class TestGetKeyLibrary:
+    """Tests for getKeyLibrary resolver."""
+
+    @pytest.fixture
+    def mock_env_with_key_library(self, monkeypatch):
+        """Set up environment variables including key library table."""
+        monkeypatch.setenv("TRACKING_TABLE", "test-tracking-table")
+        monkeypatch.setenv("DATA_BUCKET", "test-data-bucket")
+        monkeypatch.setenv("STATE_MACHINE_ARN", "arn:aws:states:us-east-1:123:stateMachine:test")
+        monkeypatch.setenv("CONFIGURATION_TABLE_NAME", "test-config-table")
+        monkeypatch.setenv("METADATA_KEY_LIBRARY_TABLE", "test-key-library-table")
+        with patch("ragstack_common.auth.check_public_access", return_value=(True, None)):
+            yield
+
+    def test_get_key_library_success(self, mock_env_with_key_library, mock_boto3):
+        """Test successful retrieval of key library."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].scan.return_value = {
+            "Items": [
+                {
+                    "key_name": "topic",
+                    "data_type": "string",
+                    "occurrence_count": 100,
+                    "sample_values": ["immigration", "genealogy"],
+                    "status": "active",
+                },
+                {
+                    "key_name": "location",
+                    "data_type": "string",
+                    "occurrence_count": 50,
+                    "sample_values": ["NYC", "Boston"],
+                    "status": "active",
+                },
+            ]
+        }
+
+        event = {
+            "info": {"fieldName": "getKeyLibrary"},
+            "arguments": {},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert len(result) == 2
+        assert result[0]["keyName"] == "topic"
+        assert result[0]["occurrenceCount"] == 100
+        assert result[1]["keyName"] == "location"
+
+    def test_get_key_library_filters_inactive(self, mock_env_with_key_library, mock_boto3):
+        """Test that inactive keys are filtered out."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].scan.return_value = {
+            "Items": [
+                {"key_name": "active_key", "status": "active", "occurrence_count": 10},
+                {"key_name": "inactive_key", "status": "inactive", "occurrence_count": 5},
+            ]
+        }
+
+        event = {
+            "info": {"fieldName": "getKeyLibrary"},
+            "arguments": {},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert len(result) == 1
+        assert result[0]["keyName"] == "active_key"
+
+    def test_get_key_library_empty(self, mock_env_with_key_library, mock_boto3):
+        """Test empty key library returns empty list."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_boto3["table"].scan.return_value = {"Items": []}
+
+        event = {
+            "info": {"fieldName": "getKeyLibrary"},
+            "arguments": {},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert result == []
+
+    def test_get_key_library_no_table_configured(self, mock_env, mock_boto3):
+        """Test returns empty list when table not configured."""
+        module = _load_appsync_resolvers_module()
+        import resolvers.metadata as metadata_mod
+
+        metadata_mod.METADATA_KEY_LIBRARY_TABLE = None
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "getKeyLibrary"},
+            "arguments": {},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert result == []
+
+
+class TestCheckKeySimilarity:
+    """Tests for checkKeySimilarity resolver."""
+
+    @pytest.fixture
+    def mock_env_with_key_library(self, monkeypatch):
+        """Set up environment variables including key library table."""
+        monkeypatch.setenv("TRACKING_TABLE", "test-tracking-table")
+        monkeypatch.setenv("DATA_BUCKET", "test-data-bucket")
+        monkeypatch.setenv("STATE_MACHINE_ARN", "arn:aws:states:us-east-1:123:stateMachine:test")
+        monkeypatch.setenv("CONFIGURATION_TABLE_NAME", "test-config-table")
+        monkeypatch.setenv("METADATA_KEY_LIBRARY_TABLE", "test-key-library-table")
+        with patch("ragstack_common.auth.check_public_access", return_value=(True, None)):
+            yield
+
+    def test_check_key_similarity_success(self, mock_env_with_key_library, mock_boto3):
+        """Test successful key similarity check."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        # Mock KeyLibrary.check_key_similarity
+        with patch("ragstack_common.key_library.KeyLibrary.check_key_similarity") as mock_check:
+            mock_check.return_value = [
+                {"keyName": "topic", "similarity": 0.95, "occurrenceCount": 100}
+            ]
+
+            event = {
+                "info": {"fieldName": "checkKeySimilarity"},
+                "arguments": {"keyName": "topics"},
+            }
+
+            result = module.lambda_handler(event, None)
+
+            assert result["proposedKey"] == "topics"
+            assert result["hasSimilar"] is True
+            assert len(result["similarKeys"]) == 1
+
+    def test_check_key_similarity_no_matches(self, mock_env_with_key_library, mock_boto3):
+        """Test similarity check with no matches."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        with patch("ragstack_common.key_library.KeyLibrary.check_key_similarity") as mock_check:
+            mock_check.return_value = []
+
+            event = {
+                "info": {"fieldName": "checkKeySimilarity"},
+                "arguments": {"keyName": "unique_key"},
+            }
+
+            result = module.lambda_handler(event, None)
+
+            assert result["proposedKey"] == "unique_key"
+            assert result["hasSimilar"] is False
+            assert len(result["similarKeys"]) == 0
+
+    def test_check_key_similarity_missing_key_name(self, mock_env_with_key_library, mock_boto3):
+        """Test error when keyName is missing."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "checkKeySimilarity"},
+            "arguments": {},
+        }
+
+        with pytest.raises(ValueError, match="required"):
+            module.lambda_handler(event, None)
+
+    def test_check_key_similarity_invalid_threshold(self, mock_env_with_key_library, mock_boto3):
+        """Test error when threshold is out of range."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "checkKeySimilarity"},
+            "arguments": {"keyName": "topic", "threshold": 1.5},
+        }
+
+        with pytest.raises(ValueError, match="between 0 and 1"):
+            module.lambda_handler(event, None)
+
+    def test_check_key_similarity_no_table_configured(self, mock_env, mock_boto3):
+        """Test returns empty when table not configured."""
+        module = _load_appsync_resolvers_module()
+        import resolvers.metadata as metadata_mod
+
+        metadata_mod.METADATA_KEY_LIBRARY_TABLE = None
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "checkKeySimilarity"},
+            "arguments": {"keyName": "topic"},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert result["proposedKey"] == "topic"
+        assert result["hasSimilar"] is False
+        assert len(result["similarKeys"]) == 0
+
+
+class TestDeleteMetadataKey:
+    """Tests for deleteMetadataKey resolver."""
+
+    @pytest.fixture
+    def mock_env_with_key_library(self, monkeypatch):
+        """Set up environment variables including key library table."""
+        monkeypatch.setenv("TRACKING_TABLE", "test-tracking-table")
+        monkeypatch.setenv("DATA_BUCKET", "test-data-bucket")
+        monkeypatch.setenv("STATE_MACHINE_ARN", "arn:aws:states:us-east-1:123:stateMachine:test")
+        monkeypatch.setenv("CONFIGURATION_TABLE_NAME", "test-config-table")
+        monkeypatch.setenv("METADATA_KEY_LIBRARY_TABLE", "test-key-library-table")
+        with patch("ragstack_common.auth.check_public_access", return_value=(True, None)):
+            yield
+
+    def test_delete_metadata_key_success(self, mock_env_with_key_library, mock_boto3):
+        """Test successful key deletion."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        with patch("ragstack_common.key_library.KeyLibrary.delete_key") as mock_delete:
+            mock_delete.return_value = True
+
+            event = {
+                "info": {"fieldName": "deleteMetadataKey"},
+                "arguments": {"keyName": "old_key"},
+            }
+
+            result = module.lambda_handler(event, None)
+
+            assert result["success"] is True
+            assert result["keyName"] == "old_key"
+            mock_delete.assert_called_once_with("old_key")
+
+    def test_delete_metadata_key_no_table(self, mock_env, mock_boto3):
+        """Test returns error when table not configured."""
+        module = _load_appsync_resolvers_module()
+        import resolvers.metadata as metadata_mod
+
+        metadata_mod.METADATA_KEY_LIBRARY_TABLE = None
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "deleteMetadataKey"},
+            "arguments": {"keyName": "old_key"},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert result["success"] is False
+        assert "not configured" in result["error"]
+
+    def test_delete_metadata_key_missing_key_name(self, mock_env_with_key_library, mock_boto3):
+        """Test returns error when keyName is missing."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        event = {
+            "info": {"fieldName": "deleteMetadataKey"},
+            "arguments": {},
+        }
+
+        result = module.lambda_handler(event, None)
+
+        assert result["success"] is False
+
+    def test_delete_metadata_key_removes_from_filter_allowlist(
+        self, mock_env_with_key_library, mock_boto3
+    ):
+        """Test that deleting a key also removes it from filter keys allowlist."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_config = MagicMock()
+        mock_config.get_parameter.return_value = ["location", "year", "author"]
+
+        import resolvers.metadata as metadata_mod
+
+        with (
+            patch("ragstack_common.key_library.KeyLibrary.delete_key") as mock_delete,
+            patch.object(metadata_mod, "get_config_manager", return_value=mock_config),
+        ):
+            mock_delete.return_value = True
+
+            event = {
+                "info": {"fieldName": "deleteMetadataKey"},
+                "arguments": {"keyName": "location"},
+            }
+
+            result = module.lambda_handler(event, None)
+
+            assert result["success"] is True
+            # Verify config was updated without the deleted key
+            mock_config.update_custom_config.assert_called_once()
+            update_call = mock_config.update_custom_config.call_args[0][0]
+            updated_keys = update_call["metadata_filter_keys"]
+            assert "location" not in updated_keys
+            assert "year" in updated_keys
+            assert "author" in updated_keys
+
+
+class TestRegenerateFilterExamples:
+    """Tests for regenerateFilterExamples resolver."""
+
+    @pytest.fixture
+    def mock_env_with_key_library(self, monkeypatch):
+        """Set up environment variables including key library table."""
+        monkeypatch.setenv("TRACKING_TABLE", "test-tracking-table")
+        monkeypatch.setenv("DATA_BUCKET", "test-data-bucket")
+        monkeypatch.setenv("STATE_MACHINE_ARN", "arn:aws:states:us-east-1:123:stateMachine:test")
+        monkeypatch.setenv("CONFIGURATION_TABLE_NAME", "test-config-table")
+        monkeypatch.setenv("METADATA_KEY_LIBRARY_TABLE", "test-key-library-table")
+        with patch("ragstack_common.auth.check_public_access", return_value=(True, None)):
+            yield
+
+    def test_no_filter_keys_returns_error(self, mock_env_with_key_library, mock_boto3):
+        """When no filter keys configured, returns helpful error."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        mock_config = MagicMock()
+        mock_config.get_parameter.return_value = []
+
+        import resolvers.metadata as metadata_mod
+
+        with patch.object(metadata_mod, "get_config_manager", return_value=mock_config):
+            event = {
+                "info": {"fieldName": "regenerateFilterExamples"},
+                "arguments": {},
+            }
+
+            result = module.lambda_handler(event, None)
+
+            assert result["success"] is False
+            assert "No filter keys configured" in result["error"]
+            assert result["examplesGenerated"] == 0
+
+    def test_generates_examples_with_allowed_keys_only(self, mock_env_with_key_library, mock_boto3):
+        """Only uses keys from the filter allowlist."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        import resolvers.metadata as metadata_mod
+
+        mock_config = MagicMock()
+
+        def get_param_side_effect(key, default=None):
+            if key == "metadata_filter_keys":
+                return ["location", "year"]
+            return default
+
+        mock_config.get_parameter.side_effect = get_param_side_effect
+
+        # Mock key library
+        mock_key_library = MagicMock()
+        mock_key_library.get_active_keys.return_value = [
+            {"key_name": "location", "data_type": "string", "occurrence_count": 10},
+            {"key_name": "year", "data_type": "number", "occurrence_count": 5},
+            {"key_name": "author", "data_type": "string", "occurrence_count": 3},
+        ]
+
+        # Patch at metadata module level where it's imported
+        with (
+            patch.object(metadata_mod, "get_config_manager", return_value=mock_config),
+            patch.object(metadata_mod, "KeyLibrary", return_value=mock_key_library),
+            patch.object(metadata_mod, "generate_filter_examples") as mock_generate,
+            patch.object(metadata_mod, "store_filter_examples"),
+            patch.object(metadata_mod, "update_config_with_examples"),
+        ):
+            mock_generate.return_value = [{"name": "test", "filter": {}}]
+
+            event = {
+                "info": {"fieldName": "regenerateFilterExamples"},
+                "arguments": {},
+            }
+
+            result = module.lambda_handler(event, None)
+
+            # Verify only allowed keys were passed
+            call_args = mock_generate.call_args
+            field_analysis = call_args[0][0]
+            assert "location" in field_analysis
+            assert "year" in field_analysis
+            assert "author" not in field_analysis  # Not in allowlist
+
+            assert result["success"] is True
+            assert result["examplesGenerated"] == 1
+
+    def test_no_active_keys_matching_filter(self, mock_env_with_key_library, mock_boto3):
+        """Returns error when no active keys match the filter allowlist."""
+        module = _load_appsync_resolvers_module()
+        _patch_resolver_clients(module, mock_boto3)
+
+        import resolvers.metadata as metadata_mod
+
+        mock_config = MagicMock()
+        mock_config.get_parameter.side_effect = lambda key, default=None: (
+            ["nonexistent_key"] if key == "metadata_filter_keys" else default
+        )
+
+        mock_key_library = MagicMock()
+        mock_key_library.get_active_keys.return_value = [
+            {"key_name": "location", "data_type": "string", "occurrence_count": 10},
+        ]
+
+        with (
+            patch.object(metadata_mod, "get_config_manager", return_value=mock_config),
+            patch.object(metadata_mod, "KeyLibrary", return_value=mock_key_library),
+        ):
+            event = {
+                "info": {"fieldName": "regenerateFilterExamples"},
+                "arguments": {},
+            }
+
+            result = module.lambda_handler(event, None)
+
+            assert result["success"] is False
+            assert "None of the configured filter keys are active" in result["error"]
+
+
+class TestEnvVarValidation:
+    """Tests for environment variable validation at handler entry."""
+
+    def test_missing_tracking_table_raises_value_error(self, monkeypatch, mock_boto3):
+        """Handler raises ValueError with descriptive message when TRACKING_TABLE missing."""
+        monkeypatch.delenv("TRACKING_TABLE", raising=False)
+        monkeypatch.setenv("DATA_BUCKET", "test-bucket")
+        monkeypatch.setenv("CONFIGURATION_TABLE_NAME", "test-config")
+
+        with patch("ragstack_common.auth.check_public_access", return_value=(True, None)):
+            module = _load_appsync_resolvers_module()
+
+        event = {"info": {"fieldName": "listDocuments"}, "arguments": {}}
+        with pytest.raises(ValueError, match="TRACKING_TABLE environment variable is required"):
+            module.lambda_handler(event, None)
+
+    def test_missing_data_bucket_raises_value_error(self, monkeypatch, mock_boto3):
+        """Handler raises ValueError with descriptive message when DATA_BUCKET missing."""
+        monkeypatch.setenv("TRACKING_TABLE", "test-table")
+        monkeypatch.delenv("DATA_BUCKET", raising=False)
+        monkeypatch.setenv("CONFIGURATION_TABLE_NAME", "test-config")
+
+        with patch("ragstack_common.auth.check_public_access", return_value=(True, None)):
+            module = _load_appsync_resolvers_module()
+
+        event = {"info": {"fieldName": "listDocuments"}, "arguments": {}}
+        with pytest.raises(ValueError, match="DATA_BUCKET environment variable is required"):
+            module.lambda_handler(event, None)

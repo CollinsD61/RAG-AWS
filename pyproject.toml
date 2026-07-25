@@ -1,0 +1,175 @@
+# pyproject.toml - Python project configuration
+
+[project]
+name = "ragstack-lambda"
+version = "2.0.0"
+requires-python = ">=3.13"
+
+[tool.ruff]
+# Ruff version: 0.14.2 (pinned in requirements-dev.txt)
+# Line length set to 100 chars (AWS Lambda best practice)
+line-length = 100
+target-version = "py313"
+
+# Include Python source directories
+include = ["lib/**/*.py", "src/lambda/**/*.py", "tests/**/*.py"]
+
+# Exclude build artifacts, virtual environments, and frontend code
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "*.pyc",
+    ".pytest_cache",
+    ".coverage",
+    "htmlcov",
+    "dist",
+    "build",
+    "*.egg-info",
+    ".aws-sam",
+    "node_modules",
+    "src/ui",
+]
+
+[tool.ruff.lint]
+# Enable recommended rules by default
+# https://docs.astral.sh/ruff/rules/
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort (import sorting)
+    "N",    # pep8-naming
+    "UP",   # pyupgrade (modern Python syntax)
+    "B",    # flake8-bugbear (common bugs)
+    "C4",   # flake8-comprehensions
+    "DTZ",  # flake8-datetimez (timezone-aware datetimes)
+    "PIE",  # flake8-pie (misc lints)
+    "RET",  # flake8-return (return statement checks)
+    "SIM",  # flake8-simplify
+    "ARG",  # flake8-unused-arguments
+    "PTH",  # flake8-use-pathlib
+]
+
+# Rules to ignore (with justification)
+ignore = [
+    # AWS Lambda functions require (event, context) signature even if context unused
+    "ARG001",  # Unused function argument (common in Lambda handlers)
+
+    # Datetime usage for logging and internal timestamps doesn't require timezone awareness
+    "DTZ003",  # datetime.utcnow() - used for ISO8601 timestamps in logs
+    "DTZ005",  # datetime.now() - used for internal timing/logging
+
+    # Naming conventions for AWS SDK mocking and constants
+    "N803",    # DynamoDB parameter names like 'Key' match AWS SDK conventions
+    "N806",    # UPPER_CASE constants in functions (e.g., MAX_DOCUMENTS_PER_JOB)
+
+    # Enum style - str + Enum is used for JSON serialization compatibility
+    "UP042",   # Class inherits from both str and enum.Enum (prefer StrEnum)
+
+    # Test files using pathlib.Path with open() is acceptable
+    # PTH123 is handled via per-file-ignores for tests/
+]
+
+# Allow auto-fixing for safe rules
+fixable = ["ALL"]
+unfixable = []
+
+# Allow unused variables when underscore-prefixed
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.per-file-ignores]
+# Test files can have additional flexibility
+"tests/**/*.py" = [
+    "ARG001",  # Unused function arguments (common in fixtures)
+    "ARG002",  # Unused method arguments (common in pytest fixtures)
+    "S101",    # Use of assert (required for pytest)
+    "PTH123",  # Using open() instead of Path.open() is acceptable in tests
+    "E402",    # Module imports after sys.path manipulation (required for Lambda tests)
+]
+
+[tool.ruff.format]
+# Use consistent formatting
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+skip-magic-trailing-comma = false
+
+[tool.ruff.lint.isort]
+# Import sorting configuration
+known-first-party = ["ragstack_common"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+
+# Lambda handlers all named index.py, need explicit paths
+files = ["lib/ragstack_common/", "src/lambda/"]
+exclude = [
+    "ragstack-mcp",
+    "src/lambda/configuration_resolver/test_.*\\.py",
+]
+# Each Lambda handler directory has its own index.py
+explicit_package_bases = true
+mypy_path = "lib:src/lambda/appsync_resolvers"
+
+# Third-party libraries without stubs
+[[tool.mypy.overrides]]
+module = [
+    "ebooklib.*",
+    "docx.*",
+    "openpyxl.*",
+    "fitz.*",
+    "bs4.*",
+    "markdownify.*",
+    "lxml.*",
+    "awslambdaric.*",
+    "httpx.*",
+    "yaml.*",
+    "kb_migrator.*",
+    "crhelper.*",
+]
+ignore_missing_imports = true
+
+# Lambda handlers use many dynamic patterns (DynamoDB responses, event parsing)
+# Require type annotations but relax strict checking for boto3 dynamic APIs
+[[tool.mypy.overrides]]
+module = "*.index"
+disallow_untyped_calls = false
+disallow_any_generics = false
+disallow_untyped_decorators = false
+warn_return_any = false
+
+[[tool.mypy.overrides]]
+module = "index"
+disallow_untyped_calls = false
+disallow_any_generics = false
+disallow_untyped_decorators = false
+warn_return_any = false
+
+# Resolver modules use env vars validated at dispatcher level (index.py).
+# Env vars are str|None but guaranteed non-None by the time resolvers run.
+[[tool.mypy.overrides]]
+module = "resolvers.*"
+disable_error_code = ["arg-type", "union-attr", "type-arg"]
+
+# text_extractors and scraper have complex third-party types - ignore errors
+[[tool.mypy.overrides]]
+module = [
+    "ragstack_common.text_extractors.*",
+    "ragstack_common.scraper.*",
+]
+ignore_errors = true
+
+# setup.py uses setuptools which lacks stubs
+[[tool.mypy.overrides]]
+module = "setup"
+ignore_errors = true
+
+[tool.vulture]
+# Vulture configuration for dead code detection
+# Run: uvx vulture lib/ src/lambda/ tests/ vulture_whitelist.py --min-confidence 80
+min_confidence = 80
+paths = ["lib/", "src/lambda/", "tests/"]
+exclude = [".venv", "__pycache__", ".aws-sam", "node_modules"]

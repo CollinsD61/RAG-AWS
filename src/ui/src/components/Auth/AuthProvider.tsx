@@ -1,0 +1,91 @@
+import React, { createContext, useContext, useEffect, useState, useCallback, useMemo, ReactNode } from 'react';
+import { fetchAuthSession, getCurrentUser, signOut } from 'aws-amplify/auth';
+
+interface User {
+  username: string;
+  userId: string;
+  signInDetails?: unknown;
+  tokens?: unknown;
+}
+
+interface AuthContextValue {
+  user: User | null;
+  loading: boolean;
+  error: string | null;
+  isAuthenticated: boolean;
+  checkUser: () => Promise<void>;
+  logout: () => Promise<void>;
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null);
+
+export const useAuth = (): AuthContextValue => {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth must be used within AuthProvider');
+  }
+  return context;
+};
+
+interface AuthProviderProps {
+  children: ReactNode;
+}
+
+export const AuthProvider = ({ children }: AuthProviderProps) => {
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const checkUser = useCallback(async () => {
+    try {
+      const currentUser = await getCurrentUser();
+      const session = await fetchAuthSession();
+
+      setUser({
+        username: currentUser.username,
+        userId: currentUser.userId,
+        signInDetails: currentUser.signInDetails,
+        tokens: session.tokens
+      });
+    } catch (err) {
+      // Distinguish between expected "not authenticated" vs actual errors
+      const errorName = (err as { name?: string })?.name || 'Unknown';
+      const isAuthError = errorName.includes('NotAuthorizedException') ||
+                         errorName.includes('UserUnAuthenticatedException') ||
+                         errorName === 'UserNotFoundException';
+
+      // Always set user to null on any error (same UI behavior)
+      setUser(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    checkUser();
+  }, [checkUser]);
+
+  const logout = useCallback(async () => {
+    try {
+      await signOut();
+      setUser(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
+    }
+  }, []);
+
+  const value = useMemo(() => ({
+    user,
+    loading,
+    error,
+    isAuthenticated: !!user,
+    checkUser,
+    logout
+  }), [user, loading, error, checkUser, logout]);
+
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
