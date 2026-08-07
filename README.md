@@ -8,21 +8,7 @@
   <img src="docs/images/rag_workflow.png" alt="RAG Pipeline & Vector Database Workflow" width="100%" />
 </p>
 
-<p align="center">
-<a href="https://www.apache.org/licenses/LICENSE-2.0.html"><img src="https://img.shields.io/badge/license-Apache2.0-blue" alt="Apache 2.0 License" /></a>
-<a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.13-3776AB" alt="Python 3.13" /></a>
-<a href="https://react.dev"><img src="https://img.shields.io/badge/React-19-61DAFB" alt="React 19" /></a>
-<a href="https://www.terraform.io/"><img src="https://img.shields.io/badge/Terraform-1.0+-844FBA?logo=terraform&logoColor=white" alt="Terraform" /></a>
-</p>
 
-<p align="center">
-<a href="https://aws.amazon.com/lambda/"><img src="https://img.shields.io/badge/AWS-Lambda-FF9900" alt="AWS Lambda" /></a>
-<a href="https://aws.amazon.com/bedrock/"><img src="https://img.shields.io/badge/AWS-Bedrock-232F3E" alt="AWS Bedrock" /></a>
-<a href="https://aws.amazon.com/transcribe/"><img src="https://img.shields.io/badge/AWS-Transcribe-527FFF" alt="AWS Transcribe" /></a>
-<a href="https://aws.amazon.com/s3/"><img src="https://img.shields.io/badge/AWS-S3-569A31" alt="AWS S3" /></a>
-<a href="https://aws.amazon.com/dynamodb/"><img src="https://img.shields.io/badge/AWS-DynamoDB-4053D6" alt="AWS DynamoDB" /></a>
-<a href="https://aws.amazon.com/cognito/"><img src="https://img.shields.io/badge/AWS-Cognito-DD344C" alt="AWS Cognito" /></a>
-</p>
 
 Serverless document and media processing with AI chat. Scale-to-zero architecture — no vector database fees, no idle costs. Upload documents, images, video, and audio — extract text with OCR or transcription — query using Amazon Bedrock or your AI assistant via MCP.
 

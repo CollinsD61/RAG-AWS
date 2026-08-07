@@ -344,6 +344,3 @@ uv build
 uv publish
 ```
 
-## License
-
-MIT
