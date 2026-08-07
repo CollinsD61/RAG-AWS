@@ -1,9 +1,18 @@
-<img align="center" src="ragstack_banner_resized.png" alt="RAGStack-Lambda-app icon">
+# RAGStack-Lambda
+
+<p align="center">
+  <img src="docs/images/architecture.png" alt="RAGStack AWS & Terraform Architecture" width="100%" />
+</p>
+
+<p align="center">
+  <img src="docs/images/rag_workflow.png" alt="RAG Pipeline & Vector Database Workflow" width="100%" />
+</p>
 
 <p align="center">
 <a href="https://www.apache.org/licenses/LICENSE-2.0.html"><img src="https://img.shields.io/badge/license-Apache2.0-blue" alt="Apache 2.0 License" /></a>
 <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.13-3776AB" alt="Python 3.13" /></a>
 <a href="https://react.dev"><img src="https://img.shields.io/badge/React-19-61DAFB" alt="React 19" /></a>
+<a href="https://www.terraform.io/"><img src="https://img.shields.io/badge/Terraform-1.0+-844FBA?logo=terraform&logoColor=white" alt="Terraform" /></a>
 </p>
 
 <p align="center">
@@ -20,19 +29,20 @@ Serverless document and media processing with AI chat. Scale-to-zero architectur
 
 ## Features
 
-- ☁️ Fully serverless architecture (Lambda, Step Functions, S3, DynamoDB)
-- 🧠 **NEW** Amazon Nova multimodal embeddings for text and image vectorization
+- ☁️ Fully serverless architecture (Lambda, Step Functions, S3, DynamoDB, AppSync)
+- 🏗️ Infrastructure as Code (IaC) provisioned via **Terraform**
+- 🧠 Amazon Nova multimodal embeddings for text and image vectorization
 - 📄 Document processing & vectorization (PDF, images, Office docs, HTML, CSV, JSON, XML, EML, EPUB) → stored in managed knowledge base
-- 🎬 **NEW** Video/audio processing - transcribe speech with AWS Transcribe, searchable by timestamp
+- 🎬 Video/audio processing - transcribe speech with AWS Transcribe, searchable by timestamp
 - 💬 AI chat with retrieval-augmented context and source attribution
 - 📎 Collapsible source citations with optional document downloads
-- ⏱️ **NEW** Media sources with timestamp links - click to play at exact position
+- ⏱️ Media sources with timestamp links - click to play at exact position
 - 🔍 Metadata filtering - auto-discover document metadata and filter search results
 - 🎯 Relevancy boost for filtered results - prioritize matches from metadata filters
 - 🔄 Knowledge Base reindex - regenerate metadata for existing documents with updated settings
 - 🗑️ Document management - reprocess, reindex, or delete documents from the dashboard
 - 🌐 Web component for any framework (React, Vue, Angular, Svelte)
-- 🚀 One-click deploy
+- 🚀 One-command deploy via Terraform
 - 💰 $7-10/month (1000 docs, Textract + Haiku)
 
 ## Live Demo
@@ -48,20 +58,27 @@ Serverless document and media processing with AI chat. Scale-to-zero architectur
 
 ## Quick Start
 
-### Option 1: One-Click Deploy (AWS Marketplace)
+### Option 1: Terraform Deployment
 
-**REPO IS IN ACTIVE DEVELOPMENT AND WILL CHANGE OFTEN**
+Deploy directly using Terraform Infrastructure as Code (IaC):
 
-Deploy directly from the AWS Console - no local setup required:
+1. Clone the repository:
+```bash
+git clone https://github.com/CollinsD61/RAG-AWS.git
+cd RAGStack-Lambda
+```
 
-1. [Subscribe to RAGStack on AWS Marketplace](https://aws.amazon.com/marketplace/pp/prodview-5afdiw2zrht6o) (free, not required - If subscribed Lambda roles auto-accept Bedrock model agreements on first invocation)
-2. [Click here to deploy](https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/review?templateURL=https://ragstack-quicklaunch-public.s3.us-east-1.amazonaws.com/ragstack-template.yaml&stackName=my-docs)
-3. Enter a stack name (**lowercase only**, e.g., "my-docs") and your admin email
-4. Click **Create Stack** (deployment takes ~10 minutes)
+2. Initialize Terraform and apply configuration:
+```bash
+terraform init
+terraform apply -var="admin_email=admin@example.com" -var="environment=prod"
+```
+
+3. Confirm execution by entering `yes` when prompted (deployment takes ~10 minutes).
 
 **After deployment:**
-- Check your email for the temporary password (from Cognito)
-- Go to CloudFormation → your stack → **Outputs** tab to find the Dashboard URL (`UIUrl`)
+- Check your email for the temporary password (from AWS Cognito)
+- Run `terraform output` to retrieve your Dashboard URL (`ui_url`) and GraphQL Endpoint
 
 ### Option 2: Deploy from Source
 
@@ -71,7 +88,7 @@ For customization or development:
 - AWS Account with admin access
 - Python 3.13+, Node.js 24+
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
-- AWS CLI, SAM CLI (configured)
+- AWS CLI & Terraform 1.0+ (configured)
 - Docker (for Lambda layer builds)
 
 ```bash
@@ -87,20 +104,16 @@ python publish.py \
   --admin-email admin@example.com
 ```
 
-### Option 3: Nested Stack Deployment
+### Option 3: Terraform Module Integration
 
-Deploy RAGStack as part of a larger CloudFormation stack. See [Nested Stack Deployment Guide](docs/NESTED_STACK_DEPLOYMENT.md) for details.
+Include RAGStack as a module in your existing Terraform project:
 
-**Quick example:**
-```yaml
-Resources:
-  RAGStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://ragstack-quicklaunch-public.s3.us-east-1.amazonaws.com/ragstack-template.yaml
-      Parameters:
-        StackPrefix: 'my-app-ragstack'  # Required: lowercase prefix
-        AdminEmail: admin@example.com
+```hcl
+module "ragstack" {
+  source       = "github.com/CollinsD61/RAG-AWS//terraform"
+  stack_prefix = "my-app-ragstack"  # Required: lowercase prefix
+  admin_email  = "admin@example.com"
+}
 ```
 
 ## Web Component Integration
@@ -152,13 +165,19 @@ See [MCP Server docs](src/ragstack-mcp/README.md) for full setup instructions.
 
 ## Architecture
 
-```
-Upload → OCR → Embeddings → Bedrock KB
-                                ↓
- Web UI (Dashboard + Chat) ←→ GraphQL API
-                                ↓
- Web Component ←→ AI Chat with Sources
-```
+### System Architecture
+The system architecture leverages AWS serverless services (Lambda, Step Functions, S3, DynamoDB, Cognito, AppSync, Bedrock) fully provisioned and managed via **Terraform**:
+
+<p align="center">
+  <img src="docs/images/architecture.png" alt="RAGStack Architecture with Terraform" width="100%" />
+</p>
+
+### RAG & Vector Search Workflow
+Document ingestion, chunking, embedding generation with Bedrock Nova / Nova Lite, vector database retrieval, and streamed LLM response flow:
+
+<p align="center">
+  <img src="docs/images/rag_workflow.png" alt="RAG Pipeline and Vector DB Workflow" width="100%" />
+</p>
 
 ## Usage
 
@@ -190,13 +209,10 @@ Upload MP4, WebM, MP3, WAV, M4A, OGG, or FLAC files. Speech is transcribed using
 
 See [Configuration](docs/CONFIGURATION.md#media-processing-videoaudio) for language and speaker settings.
 
-### Chat
-Ask questions about your content. Sources show where answers came from.
-
 ## Documentation
 
 - [Configuration](docs/CONFIGURATION.md) - Settings, quotas, API keys & document management
-- [Nested Stack Deployment](docs/NESTED_STACK_DEPLOYMENT.md) - Deploy as part of larger CloudFormation stack
+- [Terraform Deployment](docs/NESTED_STACK_DEPLOYMENT.md) - Deploy as part of existing Terraform infrastructure
 - [Image Upload](docs/IMAGE_UPLOAD.md) - Image upload and captioning
 - [Web Scraping](docs/WEB_SCRAPING.md) - Scrape websites
 - [Metadata Filtering](docs/METADATA_FILTERING.md) - Auto-discover metadata and filter results
@@ -216,10 +232,13 @@ npm run check  # Lint + test all (backend + frontend)
 
 ## Deployment Options
 
-### Direct Deployment
+### Direct Deployment with Terraform
 
 ```bash
-# Full deployment (defaults to us-east-1)
+# Full deployment via Terraform (defaults to us-east-1)
+terraform apply -var="stack_name=myapp" -var="admin_email=admin@example.com"
+
+# Or via deployment script:
 python publish.py --stack-name myapp --admin-email admin@example.com
 
 # Skip dashboard build (still builds web component)
@@ -232,15 +251,15 @@ python publish.py --stack-name myapp --admin-email admin@example.com --skip-ui-a
 python publish.py --stack-name myapp --admin-email admin@example.com --demo-mode
 ```
 
-### Publish to AWS Marketplace (Maintainers)
+### Publish Terraform Modules / Artifacts (Maintainers)
 
-To update the one-click deploy template:
+To package and update deployment artifacts:
 
 ```bash
 python publish.py --publish-marketplace
 ```
 
-This packages the application and uploads to S3 for one-click deployment.
+This packages the application and Terraform modules for automated deployment.
 
 > **Note:** Currently requires us-east-1 (Nova Multimodal Embeddings). When available in other regions, use `--region <region>`.
 
